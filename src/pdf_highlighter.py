@@ -311,9 +311,9 @@ def _choose_best_margin_spot(
 
     DEFAULT_W = 130.0
     MIN_W = 45.0
-    SAFE_GAP = 5.0
-    BAND = 260.0
-    EDGE_BUFFER = 2.0
+    SAFE_GAP = 6.0          # gap between callout and body text column
+    BAND = 260.0            # vertical window around highlight for body detection
+    EDGE_BUFFER = 2.0       # tiny shrink to avoid font overhang into body
 
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied]
     target_buf = [inflate_rect(t, GAP_FROM_HIGHLIGHTS) for t in targets]
@@ -327,18 +327,18 @@ def _choose_best_margin_spot(
             y1 = pr.height - EDGE_PAD
         return y0, y1
 
-    # Word-level detection of body column near the highlight
+    # --- Body boundaries from WORDS near highlight (header doesn't matter) ---
     try:
-        words = page.get_text("words")
+        words = page.get_text("words")  # (x0,y0,x1,y1,word,block,line,wordno)
     except Exception:
         words = []
 
-    word_rects: List[fitz.Rect] = []
+    band_word_rects: List[fitz.Rect] = []
     for w in words:
         r = fitz.Rect(w[0], w[1], w[2], w[3])
         cy = (r.y0 + r.y1) / 2
         if abs(cy - target_y) <= BAND:
-            word_rects.append(r)
+            band_word_rects.append(r)
 
     def percentile(sorted_vals: List[float], p: float) -> float:
         if not sorted_vals:
@@ -347,20 +347,24 @@ def _choose_best_margin_spot(
         idx = max(0, min(len(sorted_vals) - 1, idx))
         return sorted_vals[idx]
 
-    if word_rects:
-        xs0 = sorted(r.x0 for r in word_rects)
-        xs1 = sorted(r.x1 for r in word_rects)
+    if band_word_rects:
+        xs0 = sorted(r.x0 for r in band_word_rects)
+        xs1 = sorted(r.x1 for r in band_word_rects)
+        # percentiles reduce the chance one stray word ruins the margin
         body_left = percentile(xs0, 0.05)
         body_right = percentile(xs1, 0.95)
     else:
+        # fallback if no words extracted for some reason
         body_left, body_right = pr.width * 0.20, pr.width * 0.80
 
     body_region = fitz.Rect(body_left, EDGE_PAD, body_right, pr.height - EDGE_PAD)
 
+    # Available margin widths (strict)
     left_avail = max(0.0, (body_left - SAFE_GAP) - EDGE_PAD)
     right_avail = max(0.0, (pr.width - EDGE_PAD) - (body_right + SAFE_GAP))
 
-    side_order = ["left", "right"]  # prefer left
+    # Prefer left for consistency, but try right if left can't fit
+    side_order = ["left", "right"]
 
     best: Optional[Tuple[float, fitz.Rect, str, int, bool]] = None
 
@@ -371,9 +375,11 @@ def _choose_best_margin_spot(
 
         box_w = min(DEFAULT_W, avail)
         fs, wrapped, w_used, h = _optimize_layout_for_margin(label, box_w)
+
         y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
 
         if side == "left":
+            # Anchor to left page edge; must END before body_left
             x0 = EDGE_PAD
             x1_limit = body_left - SAFE_GAP
             max_w = x1_limit - x0
@@ -382,6 +388,7 @@ def _choose_best_margin_spot(
                 continue
             cand = fitz.Rect(x0, y0, x0 + actual_w, y1)
         else:
+            # Anchor to right page edge; must START after body_right
             x1 = pr.width - EDGE_PAD
             x0_limit = body_right + SAFE_GAP
             max_w = x1 - x0_limit
@@ -392,13 +399,14 @@ def _choose_best_margin_spot(
             if cand.x0 < x0_limit:
                 continue
 
-        # safety checks
+        # Hard safety rules
         safe = (
-            (not cand.intersects(body_region))
-            and (not _intersects_any(cand, target_buf))
-            and (not _intersects_any(cand, occupied_buf))
+            (not cand.intersects(body_region)) and
+            (not _intersects_any(cand, target_buf)) and
+            (not _intersects_any(cand, occupied_buf))
         )
 
+        # Score: prefer safe, then prefer wider (readability), keep consistent left-first
         score = (0 if safe else 1_000_000) - (actual_w * 0.01)
 
         if best is None or score < best[0]:
@@ -407,6 +415,7 @@ def _choose_best_margin_spot(
         if safe:
             break
 
+    # fallback: still place somewhere, but mark unsafe
     if best is None:
         fs, wrapped, w_used, h = _optimize_layout_for_margin(label, DEFAULT_W)
         y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
@@ -415,7 +424,6 @@ def _choose_best_margin_spot(
 
     _, cand, wrapped, fs, safe = best
     return cand, wrapped, fs, safe
-
 
 
 # ============================================================
