@@ -12,7 +12,7 @@ WHITE = (1, 1, 1)
 BOX_WIDTH = 1.7          # thickness for red rectangles
 LINE_WIDTH = 1.6         # thickness for connectors
 FONTNAME = "Times-Bold"  # thicker than Times-Roman
-FONT_SIZES = [12, 11, 10]
+FONT_SIZES = [12, 11, 10, 9, 8]
 
 # ---- spacing knobs ----
 EDGE_PAD = 18.0
@@ -196,48 +196,100 @@ def _intersects_any(r: fitz.Rect, others: List[fitz.Rect]) -> bool:
 # Callout text wrapping (prefers 12, then 11, then 10)
 # ============================================================
 
+def _wrap_words_to_width(
+    words: List[str],
+    box_width: float,
+    fs: int,
+    *,
+    max_words_per_line: Optional[int] = None,
+    hard_break_long_words: bool = True,
+) -> List[str]:
+    """Wrap words to width. Optionally cap words per line; optionally hard-break long words."""
+    usable_w = max(10.0, box_width - 10.0)
+
+    def fits(s: str) -> bool:
+        return fitz.get_text_length(s, fontname=FONTNAME, fontsize=fs) <= usable_w
+
+    lines: List[str] = []
+    cur: List[str] = []
+
+    def flush():
+        nonlocal cur
+        if cur:
+            lines.append(" ".join(cur))
+            cur = []
+
+    for w in words:
+        # If the word alone doesn't fit, optionally hard-break it
+        if not fits(w) and hard_break_long_words:
+            flush()
+            chunk = ""
+            for ch in w:
+                t = chunk + ch
+                if fits(t):
+                    chunk = t
+                else:
+                    if chunk:
+                        lines.append(chunk)
+                        chunk = ch
+                    else:
+                        lines.append(ch)
+                        chunk = ""
+            if chunk:
+                cur = [chunk]
+            continue
+
+        # Try to add to current line
+        trial = cur + [w]
+        if (max_words_per_line is not None) and (len(trial) > max_words_per_line):
+            flush()
+            cur = [w]
+            continue
+
+        if fits(" ".join(trial)):
+            cur = trial
+        else:
+            flush()
+            cur = [w]
+
+    flush()
+    return lines
+
+
 def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, float, float]:
     """
-    Returns (fontsize, wrapped_text, width, height).
-    Wraps to fit box_width; if box_width is very narrow, falls back to 1 word per line.
+    Prefer wrapping over shrinking.
+    Tries (for each font size): normal wrap -> max 2 words/line -> 1 word/line.
+    Only if those fail does it move to smaller fonts (9/8).
     """
     text = (text or "").strip()
     if not text:
         return 12, "", box_width, 24.0
 
     words = text.split()
-    usable_w = max(10.0, box_width - 10.0)
 
-    # If margin is tiny, force 1 word per line (your extreme stacking case)
-    if usable_w < 55.0 and len(words) > 1:
-        fs = 11 if 11 in FONT_SIZES else FONT_SIZES[-1]
-        lines = words[:]  # one per line
-        h = (len(lines) * fs * 1.22) + 10.0
-        return fs, "\n".join(lines), box_width, h
+    wrap_modes = [
+        (None),  # normal wrap (no cap)
+        (2),     # max 2 words per line
+        (1),     # 1 word per line
+    ]
+
+    MAX_H = 140.0
 
     for fs in FONT_SIZES:
-        lines: List[str] = []
-        cur: List[str] = []
+        for cap in wrap_modes:
+            lines = _wrap_words_to_width(
+                words,
+                box_width,
+                fs,
+                max_words_per_line=cap,
+                hard_break_long_words=True,
+            )
+            h = (len(lines) * fs * 1.22) + 10.0
+            wrapped = "\n".join(lines)
 
-        for w in words:
-            trial = " ".join(cur + [w])
-            if fitz.get_text_length(trial, fontname=FONTNAME, fontsize=fs) <= usable_w:
-                cur.append(w)
-            else:
-                if cur:
-                    lines.append(" ".join(cur))
-                    cur = [w]
-                else:
-                    # single word doesn't fit; still place it on its own line
-                    lines.append(w)
-                    cur = []
-        if cur:
-            lines.append(" ".join(cur))
-
-        h = (len(lines) * fs * 1.22) + 10.0
-        # accept if reasonably compact
-        if h <= 110.0 or fs == FONT_SIZES[-1]:
-            return fs, "\n".join(lines), box_width, h
+            if h <= MAX_H or fs == FONT_SIZES[-1]:
+                return fs, wrapped, box_width, h
 
     return FONT_SIZES[-1], text, box_width, 44.0
 
