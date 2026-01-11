@@ -367,8 +367,7 @@ def _choose_best_margin_spot(
     left_avail = max(0.0, (body_left - SAFE_GAP) - EDGE_PAD)
     right_avail = max(0.0, (pr.width - EDGE_PAD) - (body_right + SAFE_GAP))
 
-    # Prefer side with more room, but try both
-    side_order = ["right", "left"] if right_avail >= left_avail else ["left", "right"]
+    side_order = ["left", "right"]  # prefer left unless it truly can't work
 
     best: Optional[Tuple[float, fitz.Rect, str, int, bool]] = None
 
@@ -382,26 +381,37 @@ def _choose_best_margin_spot(
 
         y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
 
-        if side == "left":
-            # The box must end before body_left
-            x1_limit = body_left - SAFE_GAP
-            x0_min = EDGE_PAD
-            actual_w = min(w_used, x1_limit - x0_min)
-            actual_w = max(MIN_W, actual_w - 2.0)
-            if actual_w < MIN_W:
-                continue
-            # Right-align against the text edge (nice callout look)
-            cand = fitz.Rect(x1_limit - actual_w, y0, x1_limit, y1)
-        else:
-            # The box must start after body_right
-            x0_limit = body_right + SAFE_GAP
-            x1_max = pr.width - EDGE_PAD
-            actual_w = min(w_used, x1_max - x0_limit)
-            actual_w = max(MIN_W, actual_w - 2.0)
-            if actual_w < MIN_W:
-                continue
-            # Left-align against the text edge
-            cand = fitz.Rect(x0_limit, y0, x0_limit + actual_w, y1)
+EDGE_BUFFER = 2.0  # your “glyph safety” buffer
+
+if side == "left":
+    # Hard boundary: box must END before body_left
+    x1_limit = body_left - SAFE_GAP
+    x0 = EDGE_PAD
+    max_w = x1_limit - x0
+    actual_w = min(w_used, max_w) - EDGE_BUFFER
+    if actual_w < MIN_W:
+        continue
+
+    # Anchor to the PAGE EDGE (never drifts right)
+    cand = fitz.Rect(x0, y0, x0 + actual_w, y1)
+
+else:
+    # Hard boundary: box must START after body_right
+    x0_limit = body_right + SAFE_GAP
+    x1 = pr.width - EDGE_PAD
+
+    # The max width is from x0_limit to the right edge
+    max_w = x1 - x0_limit
+    actual_w = min(w_used, max_w) - EDGE_BUFFER
+    if actual_w < MIN_W:
+        continue
+
+    # Anchor to the PAGE EDGE (never goes off-page)
+    cand = fitz.Rect(x1 - actual_w, y0, x1, y1)
+
+    # Extra guard: ensure left edge still respects the boundary
+    if cand.x0 < x0_limit:
+        continue
 
         # --- 3) Hard safety checks ---
         # Never overlap the body text region
