@@ -309,117 +309,100 @@ def _choose_best_margin_spot(
     target_union = _union_rect(targets)
     target_y = (target_union.y0 + target_union.y1) / 2
 
-    DEFAULT_W = 130.0
-    MIN_W = 45.0
-    SAFE_GAP = 6.0          # gap between callout and body text column
-    BAND = 260.0            # vertical window around highlight for body detection
-    EDGE_BUFFER = 2.0       # tiny shrink to avoid font overhang into body
+    HEADER_LIMIT = 80.0
+    FOOTER_LIMIT = 60.0
+    LANE_W = 120.0
+    SAFE_GAP = 6.0
+    BAND = 260.0
+    EDGE_BUFFER = 2.0
 
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied]
     target_buf = [inflate_rect(t, GAP_FROM_HIGHLIGHTS) for t in targets]
 
-    def clamp_y(y0: float, y1: float) -> Tuple[float, float]:
-        if y0 < EDGE_PAD:
-            y1 += (EDGE_PAD - y0)
-            y0 = EDGE_PAD
-        if y1 > pr.height - EDGE_PAD:
-            y0 -= (y1 - (pr.height - EDGE_PAD))
-            y1 = pr.height - EDGE_PAD
-        return y0, y1
-
-    # --- Body boundaries from WORDS near highlight (header doesn't matter) ---
+    # --- body boundaries from words near highlight (robust to missing header lines) ---
     try:
-        words = page.get_text("words")  # (x0,y0,x1,y1,word,block,line,wordno)
+        words = page.get_text("words") or []
     except Exception:
         words = []
 
-    band_word_rects: List[fitz.Rect] = []
+    band_rects: List[fitz.Rect] = []
     for w in words:
         r = fitz.Rect(w[0], w[1], w[2], w[3])
         cy = (r.y0 + r.y1) / 2
-        if abs(cy - target_y) <= BAND:
-            band_word_rects.append(r)
+        if abs(cy - target_y) <= BAND and r.width > 1:
+            band_rects.append(r)
 
-    def percentile(sorted_vals: List[float], p: float) -> float:
-        if not sorted_vals:
-            return 0.0
-        idx = int(round((len(sorted_vals) - 1) * p))
-        idx = max(0, min(len(sorted_vals) - 1, idx))
-        return sorted_vals[idx]
-
-    if band_word_rects:
-        xs0 = sorted(r.x0 for r in band_word_rects)
-        xs1 = sorted(r.x1 for r in band_word_rects)
-        # percentiles reduce the chance one stray word ruins the margin
-        body_left = percentile(xs0, 0.05)
-        body_right = percentile(xs1, 0.95)
+    if band_rects:
+        xs0 = sorted(r.x0 for r in band_rects)
+        xs1 = sorted(r.x1 for r in band_rects)
+        i0 = max(0, int(round((len(xs0) - 1) * 0.05)))
+        i1 = max(0, int(round((len(xs1) - 1) * 0.95)))
+        body_left = xs0[i0]
+        body_right = xs1[i1]
     else:
-        # fallback if no words extracted for some reason
         body_left, body_right = pr.width * 0.20, pr.width * 0.80
 
-    body_region = fitz.Rect(body_left, EDGE_PAD, body_right, pr.height - EDGE_PAD)
+    # Define usable vertical band (ignore header/footer area)
+    lane_y0 = max(EDGE_PAD, HEADER_LIMIT)
+    lane_y1 = min(pr.height - EDGE_PAD, pr.height - FOOTER_LIMIT)
 
-    # Available margin widths (strict)
-    left_avail = max(0.0, (body_left - SAFE_GAP) - EDGE_PAD)
-    right_avail = max(0.0, (pr.width - EDGE_PAD) - (body_right + SAFE_GAP))
+    def clamp_y(y0: float, y1: float) -> Tuple[float, float]:
+        if y0 < lane_y0:
+            y1 += (lane_y0 - y0)
+            y0 = lane_y0
+        if y1 > lane_y1:
+            y0 -= (y1 - lane_y1)
+            y1 = lane_y1
+        return y0, y1
 
-    # Prefer left for consistency, but try right if left can't fit
-    side_order = ["left", "right"]
+    # Build lanes, but clip them so they never enter the body text region
+    left_x0 = EDGE_PAD
+    left_x1 = min(EDGE_PAD + LANE_W, body_left - SAFE_GAP)
 
-    best: Optional[Tuple[float, fitz.Rect, str, int, bool]] = None
+    right_x1 = pr.width - EDGE_PAD
+    right_x0 = max(pr.width - EDGE_PAD - LANE_W, body_right + SAFE_GAP)
 
-    for side in side_order:
-        avail = left_avail if side == "left" else right_avail
-        if avail < MIN_W:
-            continue
+    lanes: List[Tuple[str, float, float]] = []
+    if (left_x1 - left_x0) >= 45.0:
+        lanes.append(("left", left_x0, left_x1))
+    if (right_x1 - right_x0) >= 45.0:
+        lanes.append(("right", right_x0, right_x1))
 
-        box_w = min(DEFAULT_W, avail)
-        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, box_w)
+    # Prefer left for consistency
+    lanes.sort(key=lambda t: 0 if t[0] == "left" else 1)
+
+    best = None
+
+    for side, x0_lane, x1_lane in lanes:
+        lane_w = (x1_lane - x0_lane)
+        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, lane_w)
 
         y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
 
+        # Ensure text box doesn't exceed lane width; include small safety buffer
+        actual_w = min(w_used, lane_w) - EDGE_BUFFER
+        if actual_w < 45.0:
+            continue
+
         if side == "left":
-            # Anchor to left page edge; must END before body_left
-            x0 = EDGE_PAD
-            x1_limit = body_left - SAFE_GAP
-            max_w = x1_limit - x0
-            actual_w = min(w_used, max_w) - EDGE_BUFFER
-            if actual_w < MIN_W:
-                continue
-            cand = fitz.Rect(x0, y0, x0 + actual_w, y1)
+            cand = fitz.Rect(x0_lane, y0, x0_lane + actual_w, y1)
         else:
-            # Anchor to right page edge; must START after body_right
-            x1 = pr.width - EDGE_PAD
-            x0_limit = body_right + SAFE_GAP
-            max_w = x1 - x0_limit
-            actual_w = min(w_used, max_w) - EDGE_BUFFER
-            if actual_w < MIN_W:
-                continue
-            cand = fitz.Rect(x1 - actual_w, y0, x1, y1)
-            if cand.x0 < x0_limit:
-                continue
+            cand = fitz.Rect(x1_lane - actual_w, y0, x1_lane, y1)
 
-        # Hard safety rules
-        safe = (
-            (not cand.intersects(body_region)) and
-            (not _intersects_any(cand, target_buf)) and
-            (not _intersects_any(cand, occupied_buf))
-        )
+        safe = (not _intersects_any(cand, occupied_buf)) and (not _intersects_any(cand, target_buf))
 
-        # Score: prefer safe, then prefer wider (readability), keep consistent left-first
-        score = (0 if safe else 1_000_000) - (actual_w * 0.01)
-
+        score = (0 if safe else 1_000_000) + (0 if side == "left" else 10)  # keep left bias
         if best is None or score < best[0]:
             best = (score, cand, wrapped, fs, safe)
 
         if safe:
             break
 
-    # fallback: still place somewhere, but mark unsafe
     if best is None:
-        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, DEFAULT_W)
+        # last-resort fallback: top-left inside page, unsafe
+        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, LANE_W)
         y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
-        cand = fitz.Rect(EDGE_PAD, y0, EDGE_PAD + min(DEFAULT_W, w_used), y1)
+        cand = fitz.Rect(EDGE_PAD, y0, EDGE_PAD + min(LANE_W, w_used), y1)
         return cand, wrapped, fs, False
 
     _, cand, wrapped, fs, safe = best
