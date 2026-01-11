@@ -28,7 +28,31 @@ _CHUNK_OVERLAP = 18
 
 
 # ============================================================
-# Geometry helpers
+# NEW: Fixed text area detection for your PDF format
+# ============================================================
+
+def _get_fixed_text_area(page: fitz.Page) -> fitz.Rect:
+    """
+    Define fixed text area based on your standard PDF layout.
+    This creates the "no-go zone" for annotations.
+    """
+    page_rect = page.rect
+    
+    # Based on your sample PDF layout
+    # Header area: ~80-100px from top
+    # Footer area: ~60px from bottom  
+    # Text appears to be centered with margins on both sides
+    
+    TEXT_AREA_TOP = 100.0      # Below header
+    TEXT_AREA_BOTTOM = page_rect.height - 60.0  # Above footer
+    TEXT_AREA_LEFT = page_rect.width * 0.15     # 15% from left
+    TEXT_AREA_RIGHT = page_rect.width * 0.85    # 15% from right (leaves 70% for text)
+    
+    return fitz.Rect(TEXT_AREA_LEFT, TEXT_AREA_TOP, TEXT_AREA_RIGHT, TEXT_AREA_BOTTOM)
+
+
+# ============================================================
+# Geometry helpers (unchanged)
 # ============================================================
 
 def inflate_rect(r: fitz.Rect, pad: float) -> fitz.Rect:
@@ -151,49 +175,7 @@ def _draw_straight_connector(
 
 
 # ============================================================
-# Page blockers (for callout placement)
-# ============================================================
-
-def _page_blockers(page: fitz.Page, pad: float = GAP_FROM_TEXT_BLOCKS) -> List[fitz.Rect]:
-    blockers: List[fitz.Rect] = []
-
-    # Text blocks
-    try:
-        for b in page.get_text("blocks"):
-            blockers.append(inflate_rect(fitz.Rect(b[:4]), pad))
-    except Exception:
-        pass
-
-    # Images
-    try:
-        for img in page.get_images(full=True):
-            xref = img[0]
-            try:
-                for r in page.get_image_rects(xref):
-                    blockers.append(inflate_rect(fitz.Rect(r), pad))
-            except Exception:
-                pass
-    except Exception:
-        pass
-
-    # Vector drawings
-    try:
-        for d in page.get_drawings():
-            r = d.get("rect")
-            if r:
-                blockers.append(inflate_rect(fitz.Rect(r), pad))
-    except Exception:
-        pass
-
-    return blockers
-
-
-def _intersects_any(r: fitz.Rect, others: List[fitz.Rect]) -> bool:
-    return any(r.intersects(o) for o in others)
-
-
-# ============================================================
-# Callout text wrapping (prefers 12, then 11, then 10)
+# Callout text wrapping (unchanged)
 # ============================================================
 
 def _wrap_words_to_width(
@@ -295,122 +277,108 @@ def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, 
 
 
 # ============================================================
-# FIXED: margin placement with (A) conditional scan, (B) skip OOB,
-# and (C) blocker filtering to the margin lane.
+# NEW: Fixed margin placement system
 # ============================================================
 
-def _choose_best_margin_spot(
+def _choose_best_margin_spot_fixed(
     page: fitz.Page,
     targets: List[fitz.Rect],
-    occupied: List[fitz.Rect],
+    occupied_callouts: List[fitz.Rect],
     label: str,
 ) -> Tuple[fitz.Rect, str, int, bool]:
-    pr = page.rect
+    """
+    Place callouts ONLY in margins outside the fixed text area.
+    """
+    page_rect = page.rect
+    text_area = _get_fixed_text_area(page)
     target_union = _union_rect(targets)
     target_y = (target_union.y0 + target_union.y1) / 2
-
-    HEADER_LIMIT = 80.0
-    FOOTER_LIMIT = 60.0
-    LANE_W = 120.0
-    SAFE_GAP = 6.0
-    BAND = 260.0
-    EDGE_BUFFER = 2.0
-
-    occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied]
-    target_buf = [inflate_rect(t, GAP_FROM_HIGHLIGHTS) for t in targets]
-
-    # --- body boundaries from words near highlight (robust to missing header lines) ---
-    try:
-        words = page.get_text("words") or []
-    except Exception:
-        words = []
-
-    band_rects: List[fitz.Rect] = []
-    for w in words:
-        r = fitz.Rect(w[0], w[1], w[2], w[3])
-        cy = (r.y0 + r.y1) / 2
-        if abs(cy - target_y) <= BAND and r.width > 1:
-            band_rects.append(r)
-
-    if band_rects:
-        xs0 = sorted(r.x0 for r in band_rects)
-        xs1 = sorted(r.x1 for r in band_rects)
-        i0 = max(0, int(round((len(xs0) - 1) * 0.05)))
-        i1 = max(0, int(round((len(xs1) - 1) * 0.95)))
-        body_left = xs0[i0]
-        body_right = xs1[i1]
-    else:
-        body_left, body_right = pr.width * 0.20, pr.width * 0.80
-
-    # Define usable vertical band (ignore header/footer area)
-    lane_y0 = max(EDGE_PAD, HEADER_LIMIT)
-    lane_y1 = min(pr.height - EDGE_PAD, pr.height - FOOTER_LIMIT)
-
-    def clamp_y(y0: float, y1: float) -> Tuple[float, float]:
-        if y0 < lane_y0:
-            y1 += (lane_y0 - y0)
-            y0 = lane_y0
-        if y1 > lane_y1:
-            y0 -= (y1 - lane_y1)
-            y1 = lane_y1
-        return y0, y1
-
-    # Build lanes, but clip them so they never enter the body text region
-    left_x0 = EDGE_PAD
-    left_x1 = min(EDGE_PAD + LANE_W, body_left - SAFE_GAP)
-
-    right_x1 = pr.width - EDGE_PAD
-    right_x0 = max(pr.width - EDGE_PAD - LANE_W, body_right + SAFE_GAP)
-
-    lanes: List[Tuple[str, float, float]] = []
-    if (left_x1 - left_x0) >= 45.0:
-        lanes.append(("left", left_x0, left_x1))
-    if (right_x1 - right_x0) >= 45.0:
-        lanes.append(("right", right_x0, right_x1))
-
-    # Prefer left for consistency
-    lanes.sort(key=lambda t: 0 if t[0] == "left" else 1)
-
+    
+    # Margin dimensions
+    MARGIN_WIDTH = 140.0  # Max width for callouts
+    MIN_MARGIN_WIDTH = 60.0  # Minimum usable width
+    EDGE_BUFFER = 8.0
+    VERTICAL_GAP = 12.0
+    
+    # Get available margin space
+    left_margin_width = text_area.x0 - EDGE_BUFFER
+    right_margin_width = page_rect.width - text_area.x1 - EDGE_BUFFER
+    
+    # Determine which margins are usable
+    usable_margins = []
+    if left_margin_width >= MIN_MARGIN_WIDTH:
+        usable_margins.append(("left", EDGE_BUFFER, min(EDGE_BUFFER + MARGIN_WIDTH, text_area.x0 - EDGE_BUFFER)))
+    if right_margin_width >= MIN_MARGIN_WIDTH:
+        usable_margins.append(("right", max(text_area.x1 + EDGE_BUFFER, page_rect.width - EDGE_BUFFER - MARGIN_WIDTH), page_rect.width - EDGE_BUFFER))
+    
+    # Prefer left margin for consistency
+    usable_margins.sort(key=lambda x: 0 if x[0] == "left" else 1)
+    
+    if not usable_margins:
+        # Fallback: tiny callout at page edge
+        fallback_rect = fitz.Rect(10, target_y - 20, 50, target_y + 20)
+        return fallback_rect, label[:20], 8, False
+    
+    # Try each usable margin
     best = None
-
-    for side, x0_lane, x1_lane in lanes:
-        lane_w = (x1_lane - x0_lane)
-        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, lane_w)
-
-        y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
-
-        # Ensure text box doesn't exceed lane width; include small safety buffer
-        actual_w = min(w_used, lane_w) - EDGE_BUFFER
-        if actual_w < 45.0:
-            continue
-
+    occupied_buf = [inflate_rect(o, VERTICAL_GAP) for o in occupied_callouts]
+    
+    for side, margin_x0, margin_x1 in usable_margins:
+        margin_width = margin_x1 - margin_x0
+        
+        # Get optimal text layout for this width
+        fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, margin_width)
+        
+        # Position vertically centered on target
+        y0 = target_y - h_needed / 2
+        y1 = target_y + h_needed / 2
+        
+        # Keep within page bounds
+        y0 = max(EDGE_BUFFER, y0)
+        y1 = min(page_rect.height - EDGE_BUFFER, y1)
+        
+        # Create callout rectangle
         if side == "left":
-            cand = fitz.Rect(x0_lane, y0, x0_lane + actual_w, y1)
-        else:
-            cand = fitz.Rect(x1_lane - actual_w, y0, x1_lane, y1)
-
-        safe = (not _intersects_any(cand, occupied_buf)) and (not _intersects_any(cand, target_buf))
-
-        score = (0 if safe else 1_000_000) + (0 if side == "left" else 10)  # keep left bias
+            callout_rect = fitz.Rect(margin_x1 - w_used, y0, margin_x1, y1)
+        else:  # right
+            callout_rect = fitz.Rect(margin_x0, y0, margin_x0 + w_used, y1)
+        
+        # Check for conflicts
+        conflicts = any(r.intersects(callout_rect) for r in occupied_buf)
+        
+        # Score this position (prefer non-conflicting, left side)
+        score = (1000 if conflicts else 0) + (10 if side == "right" else 0)
+        
         if best is None or score < best[0]:
-            best = (score, cand, wrapped, fs, safe)
-
-        if safe:
+            best = (score, callout_rect, wrapped_text, fs, not conflicts)
+        
+        # If we found a non-conflicting spot, use it
+        if not conflicts:
             break
-
-    if best is None:
-        # last-resort fallback: top-left inside page, unsafe
-        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, LANE_W)
-        y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
-        cand = fitz.Rect(EDGE_PAD, y0, EDGE_PAD + min(LANE_W, w_used), y1)
-        return cand, wrapped, fs, False
-
-    _, cand, wrapped, fs, safe = best
-    return cand, wrapped, fs, safe
+    
+    if best:
+        return best[1], best[2], best[3], best[4]
+    
+    # Last resort: force placement even with conflicts
+    side, margin_x0, margin_x1 = usable_margins[0]
+    margin_width = margin_x1 - margin_x0
+    fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, margin_width)
+    
+    y0 = target_y - h_needed / 2
+    y1 = target_y + h_needed / 2
+    y0 = max(EDGE_BUFFER, y0)
+    y1 = min(page_rect.height - EDGE_BUFFER, y1)
+    
+    if side == "left":
+        callout_rect = fitz.Rect(margin_x1 - w_used, y0, margin_x1, y1)
+    else:
+        callout_rect = fitz.Rect(margin_x0, y0, margin_x1, y1)
+    
+    return callout_rect, wrapped_text, fs, False
 
 
 # ============================================================
-# Search helpers (robust quote matching)
+# Search helpers (unchanged)
 # ============================================================
 
 def _normalize_spaces(s: str) -> str:
@@ -489,7 +457,7 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
 
 
 # ============================================================
-# Main annotation entrypoint
+# Main annotation entrypoint - UPDATED
 # ============================================================
 
 def annotate_pdf_bytes(
@@ -516,7 +484,7 @@ def annotate_pdf_bytes(
                 page.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_quote_hits += 1
 
-    # B) Metadata callouts (page 1)
+    # B) Metadata callouts (page 1) - UPDATED to use fixed placement
     def _do_job(
         label: str,
         value: Optional[str],
@@ -555,7 +523,8 @@ def annotate_pdf_bytes(
             page1.draw_rect(t, color=RED, width=BOX_WIDTH)
         total_meta_hits += len(targets)
 
-        callout_rect, wrapped_text, fs, safe = _choose_best_margin_spot(page1, targets, occupied_callouts, label)
+        # USE THE NEW FIXED PLACEMENT FUNCTION
+        callout_rect, wrapped_text, fs, safe = _choose_best_margin_spot_fixed(page1, targets, occupied_callouts, label)
 
         if safe:
             page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
