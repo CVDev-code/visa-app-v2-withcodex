@@ -347,22 +347,19 @@ def _place_annotation_in_margin(
     occupied_callouts: List[fitz.Rect],
     label: str,
 ) -> Tuple[fitz.Rect, str, int, bool]:
-    """
-    Keeps your margin positioning behavior, but:
-    - chooses left/right based on being closer to the target + fewer crossings
-    - chooses dy offset based on fewer crossings (diagonal line instead of crossing text)
-    """
     text_area = _detect_actual_text_area(page)
     pr = page.rect
     target_union = _union_rect(targets)
-    target_y = (_center(target_union)).y
+    target_c = _center(target_union)
+    target_y = target_c.y
 
-    # Margin settings (same behavior)
+    # NEW: don't let callout land on top of the highlighted thing (e.g. URL footer target)
+    target_no_go = inflate_rect(target_union, GAP_FROM_HIGHLIGHTS)
+
     MIN_CALLOUT_WIDTH = 55.0
     MAX_CALLOUT_WIDTH = 180.0
     EDGE_BUFFER = 8.0
 
-    # available margins (same geometry)
     left_lane = (EDGE_BUFFER, max(EDGE_BUFFER, text_area.x0 - EDGE_BUFFER))
     right_lane = (min(pr.width - EDGE_BUFFER, text_area.x1 + EDGE_BUFFER), pr.width - EDGE_BUFFER)
 
@@ -383,17 +380,17 @@ def _place_annotation_in_margin(
         )
         return fallback, label, 8, False
 
-    # IMPORTANT: we do NOT “lock to widest first” anymore.
-    # Instead we will score candidates. This will naturally pick the nearer side.
+    # Prefer the side nearer the target (so less line across text)
+    page_mid_x = pr.width / 2.0
+    target_side_pref = "left" if target_c.x < page_mid_x else "right"
+    lanes.sort(key=lambda t: 0 if t[0] == target_side_pref else 1)
+
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied_callouts]
 
-    # More scan points so we can get a gentle diagonal and avoid crossing words
-    scan = [0, 12, -12, 24, -24, 36, -36, 48, -48, 60, -60, 72, -72, 84, -84]
+    # NEW: prefer angled connectors: try small offsets before dy=0
+    scan = [12, -12, 24, -24, 36, -36, 48, -48, 60, -60, 72, -72, 0]
 
-    # Obstacles for scoring connector crossings
-    score_obstacles = _get_text_obstacles_for_scoring(page, targets)
-
-    best = None  # (score, cand_rect, wrapped_text, fs, safe)
+    best = None  # (score, rect, wrapped, fs, safe)
 
     for side, x0_lane, x1_lane, lane_w in lanes:
         usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
@@ -416,45 +413,44 @@ def _place_annotation_in_margin(
                 x1 = min(x1_lane, x0 + w_used)
 
             cand = fitz.Rect(x0, y0, x1, y1)
+            if cand.intersects(target_no_go):
+                continue
 
-            # hard rule: stay out of body text area
+            # Hard rule: stay out of body text area horizontally
             if cand.intersects(text_area):
                 continue
 
-            conflicts = any(r.intersects(cand) for r in occupied_buf)
+            # NEW: never cover the target highlight (prevents URL being covered)
+            if cand.intersects(target_no_go):
+                continue
+
+            conflicts = any(cand.intersects(o) for o in occupied_buf)
             safe = not conflicts
 
-            # Compute edge-to-edge connector points for scoring
-            s, e = _connector_endpoints_edge_to_edge(cand, target_union)
-            crossings = _connector_crossing_score(s, e, score_obstacles)
+            # score: prefer safe, prefer nearer side, prefer small non-zero dy (angled)
+            dx = abs(_center(cand).x - target_c.x)
 
-            # Distance bias: prefer the closer side (shorter horizontal run)
-            # (This is what makes "Beneficiary..." go left when target is on left.)
-            dx = abs(_center(cand).x - _center(target_union).x)
+            # NEW: tiny penalty for dy==0 so angled is preferred
+            dy_zero_penalty = 5.0 if dy == 0 else 0.0
 
-            # Slight preference for a small dy (avoid extreme offsets)
-            dy_pen = abs(dy) * 0.02
-
-            # BIG penalty for unsafe collisions, but still allow if needed
-            score = (0 if safe else 10_000) + crossings * 100 + dx * 0.5 + dy_pen
+            score = (0 if safe else 10_000) + dx * 0.8 + abs(dy) * 0.15 + dy_zero_penalty
 
             if best is None or score < best[0]:
                 best = (score, cand, wrapped_text, fs, safe)
 
-            # If we found a safe candidate with 0 crossings, that's excellent: stop early
-            if safe and crossings == 0:
+            if safe and dy != 0:
+                # Good enough: safe + angled
                 return cand, wrapped_text, fs, True
 
     if best:
         _, cand, wrapped_text, fs, safe = best
         return cand, wrapped_text, fs, safe
 
-    # Ultimate fallback
+    # last resort fallback
     side, x0_lane, x1_lane, lane_w = lanes[0]
     usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
     fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, usable_w)
     w_used = min(w_used, usable_w)
-
     y0 = max(EDGE_BUFFER, target_y - h_needed / 2.0)
     y1 = min(pr.height - EDGE_BUFFER, target_y + h_needed / 2.0)
 
@@ -465,7 +461,8 @@ def _place_annotation_in_margin(
         x0 = x0_lane + 5.0
         x1 = min(x1_lane, x0 + w_used)
 
-    return fitz.Rect(x0, y0, x1, y1), wrapped_text, fs, False
+    cand = fitz.Rect(x0, y0, x1, y1)
+    return cand, wrapped_text, fs, False
 
 
 # ============================================================
