@@ -311,16 +311,13 @@ def _choose_best_margin_spot(
 
     DEFAULT_W = 130.0
     MIN_W = 45.0
-    SAFE_GAP = 5.0     # gap between callout and body text
-    BAND = 260.0       # look +/- this around target_y
+    SAFE_GAP = 5.0
+    BAND = 260.0
+    EDGE_BUFFER = 2.0
 
-    # Expand existing callouts to keep space between them
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied]
-
-    # Keep away from the highlight rects
     target_buf = [inflate_rect(t, GAP_FROM_HIGHLIGHTS) for t in targets]
 
-    # Clamp vertically just to keep the box on-page (not a search)
     def clamp_y(y0: float, y1: float) -> Tuple[float, float]:
         if y0 < EDGE_PAD:
             y1 += (EDGE_PAD - y0)
@@ -330,9 +327,9 @@ def _choose_best_margin_spot(
             y1 = pr.height - EDGE_PAD
         return y0, y1
 
-    # --- 1) Word-level detection of body column near this highlight ---
+    # Word-level detection of body column near the highlight
     try:
-        words = page.get_text("words")  # (x0, y0, x1, y1, word, block_no, line_no, word_no)
+        words = page.get_text("words")
     except Exception:
         words = []
 
@@ -344,7 +341,6 @@ def _choose_best_margin_spot(
             word_rects.append(r)
 
     def percentile(sorted_vals: List[float], p: float) -> float:
-        # robust percentile index
         if not sorted_vals:
             return 0.0
         idx = int(round((len(sorted_vals) - 1) * p))
@@ -357,71 +353,52 @@ def _choose_best_margin_spot(
         body_left = percentile(xs0, 0.05)
         body_right = percentile(xs1, 0.95)
     else:
-        # fallback if no words are extractable
         body_left, body_right = pr.width * 0.20, pr.width * 0.80
 
-    # Define the protected body column region (hard "no overlap" zone)
     body_region = fitz.Rect(body_left, EDGE_PAD, body_right, pr.height - EDGE_PAD)
 
-    # --- 2) Compute true available margins outside body text ---
     left_avail = max(0.0, (body_left - SAFE_GAP) - EDGE_PAD)
     right_avail = max(0.0, (pr.width - EDGE_PAD) - (body_right + SAFE_GAP))
 
-    side_order = ["left", "right"]  # prefer left unless it truly can't work
+    side_order = ["left", "right"]  # prefer left
 
     best: Optional[Tuple[float, fitz.Rect, str, int, bool]] = None
 
     for side in side_order:
-        avail = right_avail if side == "right" else left_avail
+        avail = left_avail if side == "left" else right_avail
         if avail < MIN_W:
             continue
 
         box_w = min(DEFAULT_W, avail)
         fs, wrapped, w_used, h = _optimize_layout_for_margin(label, box_w)
-
         y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
 
-EDGE_BUFFER = 2.0  # your “glyph safety” buffer
-
-if side == "left":
-    # Hard boundary: box must END before body_left
-    x1_limit = body_left - SAFE_GAP
-    x0 = EDGE_PAD
-    max_w = x1_limit - x0
-    actual_w = min(w_used, max_w) - EDGE_BUFFER
-    if actual_w < MIN_W:
-        continue
-
-    # Anchor to the PAGE EDGE (never drifts right)
-    cand = fitz.Rect(x0, y0, x0 + actual_w, y1)
-
-else:
-    # Hard boundary: box must START after body_right
-    x0_limit = body_right + SAFE_GAP
-    x1 = pr.width - EDGE_PAD
-
-    # The max width is from x0_limit to the right edge
-    max_w = x1 - x0_limit
-    actual_w = min(w_used, max_w) - EDGE_BUFFER
-    if actual_w < MIN_W:
-        continue
-
-    # Anchor to the PAGE EDGE (never goes off-page)
-    cand = fitz.Rect(x1 - actual_w, y0, x1, y1)
-
-    # Extra guard: ensure left edge still respects the boundary
-    if cand.x0 < x0_limit:
-        continue
-
-        # --- 3) Hard safety checks ---
-        # Never overlap the body text region
-        if cand.intersects(body_region):
-            safe = False
+        if side == "left":
+            x0 = EDGE_PAD
+            x1_limit = body_left - SAFE_GAP
+            max_w = x1_limit - x0
+            actual_w = min(w_used, max_w) - EDGE_BUFFER
+            if actual_w < MIN_W:
+                continue
+            cand = fitz.Rect(x0, y0, x0 + actual_w, y1)
         else:
-            # Avoid overlaps with targets and other callouts
-            safe = (not _intersects_any(cand, target_buf)) and (not _intersects_any(cand, occupied_buf))
+            x1 = pr.width - EDGE_PAD
+            x0_limit = body_right + SAFE_GAP
+            max_w = x1 - x0_limit
+            actual_w = min(w_used, max_w) - EDGE_BUFFER
+            if actual_w < MIN_W:
+                continue
+            cand = fitz.Rect(x1 - actual_w, y0, x1, y1)
+            if cand.x0 < x0_limit:
+                continue
 
-        # Score: safe first, then wider box is better
+        # safety checks
+        safe = (
+            (not cand.intersects(body_region))
+            and (not _intersects_any(cand, target_buf))
+            and (not _intersects_any(cand, occupied_buf))
+        )
+
         score = (0 if safe else 1_000_000) - (actual_w * 0.01)
 
         if best is None or score < best[0]:
@@ -430,9 +407,7 @@ else:
         if safe:
             break
 
-    # --- 4) Final fallback (still try not to crash) ---
     if best is None:
-        # put something in left margin area but mark unsafe (caller can decide background)
         fs, wrapped, w_used, h = _optimize_layout_for_margin(label, DEFAULT_W)
         y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
         cand = fitz.Rect(EDGE_PAD, y0, EDGE_PAD + min(DEFAULT_W, w_used), y1)
@@ -441,86 +416,6 @@ else:
     _, cand, wrapped, fs, safe = best
     return cand, wrapped, fs, safe
 
-
-    # ============================================================
-    # A) Normal case: place in left/right margin with dynamic width
-    # ============================================================
-    if not use_top_bottom:
-        for side_name, x_start, avail_w in sides:
-            # Choose the *actual* width we can fit in this margin
-            margin_w = min(DEFAULT_MARGIN_W, avail_w)
-
-            fs, wrapped, w, h = _optimize_layout_for_margin(label, margin_w)
-
-            best_for_side = None
-
-            # First try centered
-            y0 = target_y - h / 2
-            y1 = target_y + h / 2
-            if in_bounds(y0, y1):
-                cand0 = fitz.Rect(x_start, y0, x_start + w, y1)
-                sc, dist = score_candidate(cand0, target_y)
-                best_for_side = (sc, cand0, wrapped, fs, is_safe(cand0))
-                if best_for_side[-1]:
-                    candidates.append(best_for_side)
-                    continue  # already safe at dy=0
-
-            # Otherwise scan vertically (skip out-of-bounds; no clamping)
-            for dy in search_steps[1:]:
-                yc = target_y + dy
-                y0 = yc - h / 2
-                y1 = yc + h / 2
-                if not in_bounds(y0, y1):
-                    continue
-                cand = fitz.Rect(x_start, y0, x_start + w, y1)
-                sc, dist = score_candidate(cand, target_y)
-                if best_for_side is None or sc < best_for_side[0]:
-                    best_for_side = (sc, cand, wrapped, fs, is_safe(cand))
-                if is_safe(cand) and dist < 5.0:
-                    break
-
-            if best_for_side:
-                candidates.append(best_for_side)
-
-    # ============================================================
-    # B) Fallback: top/bottom margin bands (still avoid content bbox)
-    # ============================================================
-    else:
-        # We’ll place the callout in the top band if possible, else bottom band.
-        # Use a conservative width so it fits somewhere even on narrow pages.
-        # It will wrap to multiple lines as needed.
-        band_w = min(DEFAULT_MARGIN_W, pr.width - 2 * EDGE_PAD)
-        fs, wrapped, w, h = _optimize_layout_for_margin(label, band_w)
-
-        # Top band candidate (above content)
-        top_y0 = EDGE_PAD
-        top_y1 = top_y0 + h
-        if top_y1 <= content_bbox.y0 - 2.0:
-            cand_top = fitz.Rect(EDGE_PAD, top_y0, EDGE_PAD + w, top_y1)
-            candidates.append((0.0 if is_safe(cand_top) else 1_000_000, cand_top, wrapped, fs, is_safe(cand_top)))
-
-        # Bottom band candidate (below content)
-        bot_y1 = pr.height - EDGE_PAD
-        bot_y0 = bot_y1 - h
-        if bot_y0 >= content_bbox.y1 + 2.0:
-            cand_bot = fitz.Rect(EDGE_PAD, bot_y0, EDGE_PAD + w, bot_y1)
-            candidates.append((0.0 if is_safe(cand_bot) else 1_000_000, cand_bot, wrapped, fs, is_safe(cand_bot)))
-
-    # Final selection
-    if not candidates:
-        # Absolute last resort: place left at EDGE_PAD and mark unsafe (no white box)
-        fs, wrapped, w, h = _optimize_layout_for_margin(label, DEFAULT_MARGIN_W)
-        cand = fitz.Rect(EDGE_PAD, EDGE_PAD, EDGE_PAD + w, EDGE_PAD + h)
-        return cand, wrapped, fs, False
-
-    candidates.sort(key=lambda x: x[0])
-    score, cand, wrapped, fs, safe = candidates[0]
-
-    # If it still isn't safe, we explicitly mark unsafe so caller won't paint background.
-    if score >= 1_000_000:
-        safe = False
-
-    return cand, wrapped, fs, safe
 
 
 # ============================================================
