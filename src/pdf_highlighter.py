@@ -584,6 +584,7 @@ def annotate_pdf_bytes(
             fontsize=fs,
             color=RED,
             align=fitz.TEXT_ALIGN_LEFT,
+            overlay=True,   # <-- critical
         )
 
         obstacles: List[fitz.Rect] = []
