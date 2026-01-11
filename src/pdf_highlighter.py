@@ -113,7 +113,6 @@ def _straight_connector_best_pair(
 
     # sample a few start points around the mid-height to avoid cutting through adjacent boxes
     base = _mid_edge_anchor(callout_rect, target_center)
-    # allow small vertical nudges (still on edge)
     nudges = [-14.0, -7.0, 0.0, 7.0, 14.0]
     starts: List[fitz.Point] = []
     for dy in nudges:
@@ -125,7 +124,6 @@ def _straight_connector_best_pair(
     best = (10**9, 10**9, starts[0], ends[0])  # (hits, length, start, end)
     for s in starts:
         for e in ends:
-            # Count obstacle crossings
             hits = 0
             for ob in obstacles:
                 if _segment_hits_rect(s, e, ob):
@@ -133,7 +131,6 @@ def _straight_connector_best_pair(
 
             length = math.hypot(e.x - s.x, e.y - s.y)
 
-            # primary: minimize hits, secondary: shortest line
             if hits < best[0] or (hits == best[0] and length < best[1]):
                 best = (hits, length, s, e)
 
@@ -228,12 +225,16 @@ def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, 
             lines.append(" ".join(cur))
 
         h = (len(lines) * fs * 1.22) + 10.0
-        # If we can keep this reasonably compact, accept this fs
         if h <= 86.0 or fs == 10:
             return fs, "\n".join(lines), box_width, h
 
     return 10, text, box_width, 44.0
 
+
+# ============================================================
+# FIXED: margin placement with (A) conditional scan, (B) skip OOB,
+# and (C) blocker filtering to the margin lane.
+# ============================================================
 
 def _choose_best_margin_spot(
     page: fitz.Page,
@@ -243,81 +244,95 @@ def _choose_best_margin_spot(
 ) -> Tuple[fitz.Rect, str, int, bool]:
     pr = page.rect
     target_union = _union_rect(targets)
-    # The ideal Y position (vertical center of the highlighted text)
     target_y = (target_union.y0 + target_union.y1) / 2
 
     margin_w = 130.0
     left_x = EDGE_PAD
     right_x = pr.width - EDGE_PAD - margin_w
 
-    # Identify all "blockers" (existing text, images, other annotations)
     blockers = _page_blockers(page, pad=GAP_FROM_TEXT_BLOCKS)
     for t in targets:
         blockers.append(inflate_rect(t, GAP_FROM_HIGHLIGHTS))
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied]
 
-    def clamp(r: fitz.Rect) -> fitz.Rect:
-        rr = fitz.Rect(r)
-        if rr.y0 < EDGE_PAD:
-            rr.y1 += (EDGE_PAD - rr.y0)
-            rr.y0 = EDGE_PAD
-        if rr.y1 > pr.height - EDGE_PAD:
-            rr.y0 -= (rr.y1 - (pr.height - EDGE_PAD))
-            rr.y1 = pr.height - EDGE_PAD
-        return rr
-
-    candidates = []
-
-    # SEARCH STRATEGY: 
-    # Instead of checking only offset "0", we check offsets up and down 
-    # (e.g., 0, +10, -10, +20, -20 ... up to +/- 250 units)
-    search_steps = [0]
+    # dy search order: 0, +10, -10, +20, -20, ... up to 250
+    search_steps = [0.0]
     for i in range(1, 26):
         search_steps.append(i * 10.0)
         search_steps.append(i * -10.0)
 
-    # Try both Left and Right margins
+    def in_bounds(y0: float, y1: float) -> bool:
+        return (y0 >= EDGE_PAD) and (y1 <= pr.height - EDGE_PAD)
+
+    def margin_lane(x_start: float) -> fitz.Rect:
+        return fitz.Rect(x_start, EDGE_PAD, x_start + margin_w, pr.height - EDGE_PAD)
+
+    candidates: List[Tuple[float, fitz.Rect, str, int, bool]] = []
+
     for x_start in [left_x, right_x]:
         fs, wrapped, w, h = _optimize_layout_for_margin(label, margin_w)
-        
-        best_for_side = None
 
-        # Scan vertical offsets to find a "safe" spot
-        for dy in search_steps:
-            # Shift the candidate box by dy
+        # Filter blockers to *only those that actually overlap this margin lane*.
+        # This prevents body text/OCR blocks from making the margin "impossible".
+        lane = margin_lane(x_start)
+        lane_blockers = [b for b in blockers if b.intersects(lane)]
+
+        # First try dy=0 explicitly (Fix A)
+        y_center0 = target_y
+        y0 = y_center0 - h / 2
+        y1 = y_center0 + h / 2
+
+        best_for_side: Optional[Tuple[float, fitz.Rect, str, int, bool]] = None
+
+        if in_bounds(y0, y1):
+            cand0 = fitz.Rect(x_start, y0, x_start + w, y1)
+            safe0 = (not _intersects_any(cand0, lane_blockers)) and (not _intersects_any(cand0, occupied_buf))
+            dist0 = abs(target_y - (cand0.y0 + cand0.y1) / 2)
+            score0 = dist0 + (0 if safe0 else 1_000_000)
+            best_for_side = (score0, cand0, wrapped, fs, safe0)
+
+            # If center is safe, accept immediately (Fix A)
+            if safe0:
+                candidates.append(best_for_side)
+                continue
+
+        # Otherwise scan (Fix B: skip out-of-bounds; no clamp snapping)
+        for dy in search_steps[1:]:
             y_center = target_y + dy
-            cand = fitz.Rect(x_start, y_center - h / 2, x_start + w, y_center + h / 2)
-            cand = clamp(cand)
+            y0 = y_center - h / 2
+            y1 = y_center + h / 2
+            if not in_bounds(y0, y1):
+                continue
 
-            # Check if this specific spot hits any text or existing box
-            safe = (not _intersects_any(cand, blockers)) and (not _intersects_any(cand, occupied_buf))
-            
-            # Calculate how far we drifted from the target (we want this low)
+            cand = fitz.Rect(x_start, y0, x_start + w, y1)
+            safe = (not _intersects_any(cand, lane_blockers)) and (not _intersects_any(cand, occupied_buf))
             dist = abs(target_y - (cand.y0 + cand.y1) / 2)
-            
-            # Scoring:
-            # If SAFE, score = distance (lower is better).
-            # If UNSAFE, score = distance + 1,000,000 (huge penalty).
             score = dist + (0 if safe else 1_000_000)
 
-            # Keep the best spot found so far for this side
             if best_for_side is None or score < best_for_side[0]:
                 best_for_side = (score, cand, wrapped, fs, safe)
-            
-            # Optimization: If we found a safe spot very close, stop searching this side
+
             if safe and dist < 5.0:
                 break
-        
+
         if best_for_side:
             candidates.append(best_for_side)
 
-    # Compare Left vs Right results and pick the one with the lowest score
+    # Fallback: if for some reason we got nothing, place left margin near top
+    if not candidates:
+        fs, wrapped, w, h = _optimize_layout_for_margin(label, margin_w)
+        y0 = EDGE_PAD
+        y1 = min(pr.height - EDGE_PAD, EDGE_PAD + h)
+        cand = fitz.Rect(left_x, y0, left_x + w, y1)
+        return cand, wrapped, fs, False
+
     candidates.sort(key=lambda x: x[0])
     score, cand, wrapped, fs, safe = candidates[0]
 
-    # 'safe' will now be True much more often because we searched for a gap.
-    # If it is still False (score > 1,000,000), it means the page is totally full.
-    
+    # If not safe, don't paint white background (still place text)
+    if score >= 1_000_000:
+        safe = False
+
     return cand, wrapped, fs, safe
 
 
@@ -340,12 +355,10 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
     if not t:
         return []
 
-    # cap extreme length
     if len(t) > _MAX_TERM:
         t = t[:_MAX_TERM]
 
     flags = 0
-    # some PyMuPDF builds provide these
     try:
         flags |= fitz.TEXT_DEHYPHENATE
     except Exception:
@@ -355,7 +368,6 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
     except Exception:
         pass
 
-    # pass 1: exact
     try:
         rects = page.search_for(t, flags=flags)
         if rects:
@@ -363,7 +375,6 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
     except Exception:
         pass
 
-    # pass 2: normalized spaces
     t2 = _normalize_spaces(t)
     if t2 and t2 != t:
         try:
@@ -373,7 +384,6 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
         except Exception:
             pass
 
-    # pass 3: chunk search for long phrases
     if len(t2) >= _CHUNK:
         hits: List[fitz.Rect] = []
         step = max(10, _CHUNK - _CHUNK_OVERLAP)
@@ -388,9 +398,7 @@ def _search_term(page: fitz.Page, term: str) -> List[fitz.Rect]:
             except Exception:
                 continue
 
-        # de-dup rectangles
         if hits:
-            # merge close/overlapping
             hits_sorted = sorted(hits, key=lambda r: (r.y0, r.x0))
             merged: List[fitz.Rect] = []
             for r in hits_sorted:
@@ -427,9 +435,7 @@ def annotate_pdf_bytes(
     total_meta_hits = 0
     occupied_callouts: List[fitz.Rect] = []
 
-    # -----------------------------
     # A) Quote highlights (all pages)
-    # -----------------------------
     for page in doc:
         for term in (quote_terms or []):
             rects = _search_term(page, term)
@@ -437,10 +443,7 @@ def annotate_pdf_bytes(
                 page.draw_rect(r, color=RED, width=BOX_WIDTH)
                 total_quote_hits += 1
 
-    # -----------------------------
     # B) Metadata callouts (page 1)
-    # Always attempt whatever values we receive in meta.
-    # -----------------------------
     def _do_job(
         label: str,
         value: Optional[str],
@@ -459,11 +462,10 @@ def annotate_pdf_bytes(
                 if vv:
                     needles.append(vv)
 
-        needles = list(dict.fromkeys(needles))  # de-dupe
+        needles = list(dict.fromkeys(needles))
         if not needles:
             return
 
-        # Find targets on page 1 (try all needles)
         targets: List[fitz.Rect] = []
         for needle in needles:
             try:
@@ -476,19 +478,15 @@ def annotate_pdf_bytes(
         if not targets:
             return
 
-        # Box all target hits
         for t in targets:
             page1.draw_rect(t, color=RED, width=BOX_WIDTH)
         total_meta_hits += len(targets)
 
-        # Place callout
         callout_rect, wrapped_text, fs, safe = _choose_best_margin_spot(page1, targets, occupied_callouts, label)
 
-        # White background only if safe
         if safe:
             page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
 
-        # Thicker-looking text: Times-Bold and slightly larger leading in wrap already handled
         page1.insert_textbox(
             callout_rect,
             wrapped_text,
@@ -498,7 +496,6 @@ def annotate_pdf_bytes(
             align=fitz.TEXT_ALIGN_LEFT,
         )
 
-        # Obstacles for “avoid crossing” scoring: other target boxes + existing text blocks
         obstacles: List[fitz.Rect] = []
         try:
             for b in page1.get_text("blocks"):
@@ -506,13 +503,11 @@ def annotate_pdf_bytes(
         except Exception:
             pass
 
-        # treat ALL highlighted targets as obstacles EXCEPT the one we're connecting to.
         expanded_all = [inflate_rect(t, 2.5) for t in targets]
 
         def connect_to(rect: fitz.Rect):
             obs = obstacles[:]
             for ot in expanded_all:
-                # if it's not basically the same rect, keep it as obstacle
                 if not (ot.intersects(rect) and (ot | rect).get_area() < (ot.get_area() + rect.get_area() + 3.0)):
                     obs.append(ot)
             for oc in occupied_callouts:
@@ -530,19 +525,10 @@ def annotate_pdf_bytes(
 
         occupied_callouts.append(callout_rect)
 
-    # Always do URL if present
     _do_job("Original source of publication.", meta.get("source_url"), connect_policy="union")
-
-    # Venue / org name
     _do_job("The distinguished organization.", meta.get("venue_name") or meta.get("org_name"), connect_policy="union")
-
-    # Date
     _do_job("Performance date.", meta.get("performance_date"), connect_policy="union")
-
-    # Salary
     _do_job("Beneficiary salary evidence.", meta.get("salary_amount"), connect_policy="union")
-
-    # Beneficiary name (try variants too) – connect to all hits (straight lines)
     _do_job(
         "Beneficiary lead role evidence.",
         meta.get("beneficiary_name"),
