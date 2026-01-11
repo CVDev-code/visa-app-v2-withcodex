@@ -310,34 +310,13 @@ def _choose_best_margin_spot(
     target_y = (target_union.y0 + target_union.y1) / 2
 
     DEFAULT_W = 130.0
-    MIN_W = 45.0  # allow very narrow; wrapping will stack
+    MIN_W = 45.0
+    SAFE_GAP = 2.0  # ensure we never cross into body text
 
-    # Build content bbox from OCR/text blocks (the area we refuse to cover)
-    try:
-        blocks = page.get_text("blocks")
-        text_rects = [fitz.Rect(b[:4]) for b in blocks]
-    except Exception:
-        text_rects = []
-
-    content_bbox = inflate_rect(_union_rect(text_rects), GAP_FROM_TEXT_BLOCKS)
-
-    # Keep away from highlights and other callouts
-    protected = [content_bbox] + [inflate_rect(t, GAP_FROM_HIGHLIGHTS) for t in targets]
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied]
-
-    # Compute available margin widths *outside* content bbox
-    left_avail = max(0.0, content_bbox.x0 - EDGE_PAD)
-    right_avail = max(0.0, (pr.width - EDGE_PAD) - content_bbox.x1)
-
-    # Decide side; prefer the side with more space
-    side_order = []
-    if right_avail >= left_avail:
-        side_order = ["right", "left"]
-    else:
-        side_order = ["left", "right"]
+    target_buf = [inflate_rect(t, GAP_FROM_HIGHLIGHTS) for t in targets]
 
     def clamp_y(y0: float, y1: float) -> Tuple[float, float]:
-        # not a search: just keep it on the page
         if y0 < EDGE_PAD:
             y1 += (EDGE_PAD - y0)
             y0 = EDGE_PAD
@@ -346,55 +325,113 @@ def _choose_best_margin_spot(
             y1 = pr.height - EDGE_PAD
         return y0, y1
 
-    def safe(cand: fitz.Rect) -> bool:
-        # Safe = does not cover OCR/body text + does not overlap other callouts
-        # (We do NOT care about images/drawings; white background can cover them.)
-        return (not _intersects_any(cand, protected)) and (not _intersects_any(cand, occupied_buf))
+    # --- Identify "body text" blocks near this highlight's vertical region ---
+    # This avoids getting tricked by headlines / site chrome at the top.
+    BAND = 220.0  # look +/- this much around the highlight
+    try:
+        blocks = page.get_text("blocks")
+        all_rects = [fitz.Rect(b[:4]) for b in blocks]
+    except Exception:
+        all_rects = []
+
+    # Filter out blocks that are likely NOT the main body text:
+    #  - too narrow (callouts, small labels)
+    #  - inside already-occupied callout areas
+    # Then choose blocks near the target_y band and reasonably wide.
+    body_candidates: List[fitz.Rect] = []
+    for r in all_rects:
+        if r.width < pr.width * 0.35:
+            continue  # too narrow to be body column
+        cy = (r.y0 + r.y1) / 2
+        if abs(cy - target_y) > BAND:
+            continue  # not near the area we're annotating
+        if any(r.intersects(ob) for ob in occupied_buf):
+            continue  # ignore our already-inserted callouts
+        body_candidates.append(r)
+
+    # Fallback if nothing matched
+    if not body_candidates:
+        for r in all_rects:
+            if r.width >= pr.width * 0.55:
+                body_candidates.append(r)
+
+    # Compute the protected body "left edge" and "right edge"
+    if body_candidates:
+        body_bbox = _union_rect(body_candidates)
+        body_left = body_bbox.x0
+        body_right = body_bbox.x1
+    else:
+        # worst-case fallback: treat center as "body"
+        body_left = pr.width * 0.25
+        body_right = pr.width * 0.75
+
+    # Compute available margin widths outside the body text column
+    left_avail = max(0.0, (body_left - SAFE_GAP) - EDGE_PAD)
+    right_avail = max(0.0, (pr.width - EDGE_PAD) - (body_right + SAFE_GAP))
+
+    # Choose side with more space, but try both if needed
+    side_order = []
+    if right_avail >= left_avail:
+        side_order = ["right", "left"]
+    else:
+        side_order = ["left", "right"]
+
+    def intersects_protected(cand: fitz.Rect) -> bool:
+        # Don't overlap highlights or other callouts.
+        if _intersects_any(cand, target_buf):
+            return True
+        if _intersects_any(cand, occupied_buf):
+            return True
+        # Hard rule: do not cross into body text column (even if blocks are weird)
+        if cand.intersects(fitz.Rect(body_left, 0, body_right, pr.height)):
+            return True
+        return False
 
     best = None  # (score, cand, wrapped, fs, safe)
 
     for side in side_order:
-        if side == "left":
-            avail = left_avail
-            if avail < MIN_W:
-                continue
-            w = min(DEFAULT_W, avail)
-            x0 = EDGE_PAD
-        else:
-            avail = right_avail
-            if avail < MIN_W:
-                continue
-            w = min(DEFAULT_W, avail)
-            x0 = pr.width - EDGE_PAD - w
+        avail = right_avail if side == "right" else left_avail
+        if avail < MIN_W:
+            continue
 
-        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, w)
-        y0 = target_y - h / 2
-        y1 = target_y + h / 2
-        y0, y1 = clamp_y(y0, y1)
+        box_w = min(DEFAULT_W, avail)
+        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, box_w)
+
+        y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
+
+        if side == "left":
+            x0 = EDGE_PAD
+            # enforce: x1 <= body_left - SAFE_GAP
+            x1_limit = body_left - SAFE_GAP
+            w_used = min(w_used, max(MIN_W, x1_limit - x0))
+        else:
+            # enforce: x0 >= body_right + SAFE_GAP
+            x1 = pr.width - EDGE_PAD
+            x0_limit = body_right + SAFE_GAP
+            w_used = min(w_used, max(MIN_W, x1 - x0_limit))
+            x0 = x1 - w_used
 
         cand = fitz.Rect(x0, y0, x0 + w_used, y1)
+        safe = not intersects_protected(cand)
 
-        s = safe(cand)
-        # score: prefer safe, then prefer closer-to-ideal y (we're not moving y though),
-        # then prefer wider boxes (more readable)
-        score = (0 if s else 1_000_000) - (w_used * 0.01)
+        # Score: safe first, then wider is better (readability)
+        score = (0 if safe else 1_000_000) - (w_used * 0.01)
 
         if best is None or score < best[0]:
-            best = (score, cand, wrapped, fs, s)
+            best = (score, cand, wrapped, fs, safe)
 
-        # If we found a safe placement, take it (no need to try the other side)
-        if s:
+        if safe:
             break
 
-    # If neither margin is viable, fall back to left but mark unsafe (no white background)
     if best is None:
+        # absolute fallback: place left but mark unsafe
         fs, wrapped, w_used, h = _optimize_layout_for_margin(label, DEFAULT_W)
         y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
         cand = fitz.Rect(EDGE_PAD, y0, EDGE_PAD + w_used, y1)
         return cand, wrapped, fs, False
 
-    _, cand, wrapped, fs, is_safe = best
-    return cand, wrapped, fs, is_safe
+    _, cand, wrapped, fs, safe = best
+    return cand, wrapped, fs, safe
 
 
     # ============================================================
