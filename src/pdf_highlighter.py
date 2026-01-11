@@ -63,28 +63,15 @@ def _pull_back_point(from_pt: fitz.Point, to_pt: fitz.Point, dist: float) -> fit
     return fitz.Point(to_pt.x + ux * dist, to_pt.y + uy * dist)
 
 
-def _draw_straight_connector(
-    page: fitz.Page,
-    callout_rect: fitz.Rect,
-    target_rect: fitz.Rect,
-):
-    """
-    Simple connector from callout edge toward target center.
-    (You can swap back to your obstacle-aware connector later.)
-    """
-    tc = _center(target_rect)
-    cy = callout_rect.y0 + callout_rect.height / 2.0
-
-    # pick side edge based on relative position
-    if callout_rect.x1 <= target_rect.x0:
-        start = fitz.Point(callout_rect.x1, cy)  # right edge
-    elif callout_rect.x0 >= target_rect.x1:
-        start = fitz.Point(callout_rect.x0, cy)  # left edge
-    else:
-        start = fitz.Point(callout_rect.x0 + callout_rect.width / 2.0, cy)
-
-    end = _pull_back_point(start, tc, ENDPOINT_PULLBACK)
-    page.draw_line(start, end, color=RED, width=LINE_WIDTH)
+def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect, steps: int = 28) -> bool:
+    """Sample points along segment; good enough for scoring line crossings."""
+    for i in range(steps + 1):
+        t = i / steps
+        x = p1.x + (p2.x - p1.x) * t
+        y = p1.y + (p2.y - p1.y) * t
+        if r.contains(fitz.Point(x, y)):
+            return True
+    return False
 
 
 # ============================================================
@@ -162,7 +149,7 @@ def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, 
         return 12, "", box_width, 24.0
 
     words = text.split()
-    max_h = 180.0  # allow taller than before; we will still "fit-check" below
+    max_h = 180.0  # allow taller; actual fit is checked by insert_textbox
 
     for fs in FONT_SIZES:
         usable_w = max(20.0, box_width - 10.0)
@@ -182,7 +169,6 @@ def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, 
             lines.append(cur)
 
         wrapped = "\n".join(lines)
-        # estimate; actual fit verified by insert_textbox return value later
         h = (len(lines) * fs * 1.25) + 10.0
 
         if h <= max_h or fs == FONT_SIZES[-1]:
@@ -192,7 +178,7 @@ def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, 
 
 
 # ============================================================
-# CRITICAL FIX: insert_textbox "fit guaranteed"
+# Fit-guaranteed textbox insertion
 # ============================================================
 
 def _insert_textbox_fit(
@@ -229,20 +215,16 @@ def _insert_textbox_fit(
 
     ret = attempt(r, fs)
 
-    # 1) expand vertically a few times
     it = 0
     while ret < 0 and it < max_expand_iters:
         need = (-ret) + extra_pad_each_iter
         r.y0 -= need / 2.0
         r.y1 += need / 2.0
-
         r.y0 = max(2.0, r.y0)
         r.y1 = min(pr.height - 2.0, r.y1)
-
         ret = attempt(r, fs)
         it += 1
 
-    # 2) if still doesn't fit, shrink font and try again (with expansion reset)
     shrink_tries = 0
     while ret < 0 and fs > FONT_SIZES[-1] and shrink_tries < 4:
         fs -= 1
@@ -254,10 +236,8 @@ def _insert_textbox_fit(
             need = (-ret) + extra_pad_each_iter
             r.y0 -= need / 2.0
             r.y1 += need / 2.0
-
             r.y0 = max(2.0, r.y0)
             r.y1 = min(pr.height - 2.0, r.y1)
-
             ret = attempt(r, fs)
             it += 1
 
@@ -267,7 +247,98 @@ def _insert_textbox_fit(
 
 
 # ============================================================
-# Margin placement: choose the *widest* usable margin first + vertical scan
+# NEW: edge-to-edge connector + crossing score
+# ============================================================
+
+def _connector_endpoints_edge_to_edge(callout_rect: fitz.Rect, target_rect: fitz.Rect) -> Tuple[fitz.Point, fitz.Point]:
+    """
+    Start on callout edge facing target; end on TARGET EDGE facing callout.
+    This avoids stabbing into the middle of the red box.
+    """
+    tc = _center(target_rect)
+    cc = _center(callout_rect)
+
+    # Start point on callout edge
+    cy = cc.y
+    if callout_rect.x1 <= target_rect.x0:
+        start = fitz.Point(callout_rect.x1, cy)  # right edge of callout
+    elif callout_rect.x0 >= target_rect.x1:
+        start = fitz.Point(callout_rect.x0, cy)  # left edge of callout
+    else:
+        # callout horizontally overlaps target; fall back to top/bottom edge decision
+        if cc.y < tc.y:
+            start = fitz.Point(cc.x, callout_rect.y1)
+        else:
+            start = fitz.Point(cc.x, callout_rect.y0)
+
+    # End point on target edge (closest edge to callout)
+    # Clamp y to target vertical span for nicer "edge touch"
+    y_on_target = min(max(cy, target_rect.y0 + 1.0), target_rect.y1 - 1.0)
+
+    if callout_rect.x1 <= target_rect.x0:
+        end = fitz.Point(target_rect.x0, y_on_target)  # LEFT edge of target
+    elif callout_rect.x0 >= target_rect.x1:
+        end = fitz.Point(target_rect.x1, y_on_target)  # RIGHT edge of target
+    else:
+        # fallback vertical edge
+        x_on_target = min(max(cc.x, target_rect.x0 + 1.0), target_rect.x1 - 1.0)
+        if cc.y < tc.y:
+            end = fitz.Point(x_on_target, target_rect.y0)  # TOP edge
+        else:
+            end = fitz.Point(x_on_target, target_rect.y1)  # BOTTOM edge
+
+    # Pull back slightly so the line ends just outside the red box, not inside it
+    end = _pull_back_point(start, end, ENDPOINT_PULLBACK)
+    return start, end
+
+
+def _get_text_obstacles_for_scoring(page: fitz.Page, targets: List[fitz.Rect]) -> List[fitz.Rect]:
+    """
+    Obstacles = text blocks inflated slightly, excluding the target highlights themselves.
+    We score crossings against these.
+    """
+    obs: List[fitz.Rect] = []
+    try:
+        blocks = page.get_text("blocks") or []
+        for b in blocks:
+            r = inflate_rect(fitz.Rect(b[:4]), 1.5)  # small inflation for sensitivity
+            obs.append(r)
+    except Exception:
+        pass
+
+    # Exclude target areas so we don't penalize "touching" the intended region
+    target_buf = [inflate_rect(t, 2.0) for t in targets]
+    filtered: List[fitz.Rect] = []
+    for r in obs:
+        if any(r.intersects(tb) for tb in target_buf):
+            continue
+        filtered.append(r)
+
+    return filtered
+
+
+def _connector_crossing_score(
+    start: fitz.Point,
+    end: fitz.Point,
+    obstacles: List[fitz.Rect],
+) -> int:
+    """
+    Lower is better. Count how many text obstacles the connector passes through.
+    """
+    hits = 0
+    for r in obstacles:
+        if _segment_hits_rect(start, end, r):
+            hits += 1
+    return hits
+
+
+def _draw_connector(page: fitz.Page, callout_rect: fitz.Rect, target_rect: fitz.Rect):
+    s, e = _connector_endpoints_edge_to_edge(callout_rect, target_rect)
+    page.draw_line(s, e, color=RED, width=LINE_WIDTH)
+
+
+# ============================================================
+# Margin placement (KEEP same lanes) + choose best side/offset by scoring crossings
 # ============================================================
 
 def _place_annotation_in_margin(
@@ -276,17 +347,22 @@ def _place_annotation_in_margin(
     occupied_callouts: List[fitz.Rect],
     label: str,
 ) -> Tuple[fitz.Rect, str, int, bool]:
+    """
+    Keeps your margin positioning behavior, but:
+    - chooses left/right based on being closer to the target + fewer crossings
+    - chooses dy offset based on fewer crossings (diagonal line instead of crossing text)
+    """
     text_area = _detect_actual_text_area(page)
     pr = page.rect
     target_union = _union_rect(targets)
-    target_y = (target_union.y0 + target_union.y1) / 2.0
+    target_y = (_center(target_union)).y
 
-    # Margin settings
+    # Margin settings (same behavior)
     MIN_CALLOUT_WIDTH = 55.0
     MAX_CALLOUT_WIDTH = 180.0
     EDGE_BUFFER = 8.0
 
-    # available margins
+    # available margins (same geometry)
     left_lane = (EDGE_BUFFER, max(EDGE_BUFFER, text_area.x0 - EDGE_BUFFER))
     right_lane = (min(pr.width - EDGE_BUFFER, text_area.x1 + EDGE_BUFFER), pr.width - EDGE_BUFFER)
 
@@ -299,23 +375,29 @@ def _place_annotation_in_margin(
         lanes.append(("right", right_lane[0], right_lane[1], rw))
 
     if not lanes:
-        # emergency fallback
-        fallback = fitz.Rect(EDGE_BUFFER, max(EDGE_BUFFER, target_y - 20), EDGE_BUFFER + 120, min(pr.height - EDGE_BUFFER, target_y + 20))
+        fallback = fitz.Rect(
+            EDGE_BUFFER,
+            max(EDGE_BUFFER, target_y - 20),
+            EDGE_BUFFER + 120,
+            min(pr.height - EDGE_BUFFER, target_y + 20),
+        )
         return fallback, label, 8, False
 
-    # ✅ CHANGE: choose widest first (instead of always left)
-    lanes.sort(key=lambda t: t[3], reverse=True)  # widest first
-
+    # IMPORTANT: we do NOT “lock to widest first” anymore.
+    # Instead we will score candidates. This will naturally pick the nearer side.
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied_callouts]
 
-    # vertical scan offsets (find nearest free slot)
-    scan = [0, 14, -14, 28, -28, 42, -42, 56, -56, 70, -70, 84, -84]
+    # More scan points so we can get a gentle diagonal and avoid crossing words
+    scan = [0, 12, -12, 24, -24, 36, -36, 48, -48, 60, -60, 72, -72, 84, -84]
+
+    # Obstacles for scoring connector crossings
+    score_obstacles = _get_text_obstacles_for_scoring(page, targets)
+
+    best = None  # (score, cand_rect, wrapped_text, fs, safe)
 
     for side, x0_lane, x1_lane, lane_w in lanes:
         usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
         fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, usable_w)
-
-        # keep width inside lane
         w_used = min(w_used, usable_w)
         if w_used < MIN_CALLOUT_WIDTH:
             continue
@@ -323,7 +405,6 @@ def _place_annotation_in_margin(
         for dy in scan:
             y0 = target_y + dy - h_needed / 2.0
             y1 = target_y + dy + h_needed / 2.0
-
             y0 = max(EDGE_BUFFER, y0)
             y1 = min(pr.height - EDGE_BUFFER, y1)
 
@@ -336,15 +417,39 @@ def _place_annotation_in_margin(
 
             cand = fitz.Rect(x0, y0, x1, y1)
 
-            # hard rule: keep out of detected text body horizontally
+            # hard rule: stay out of body text area
             if cand.intersects(text_area):
                 continue
 
             conflicts = any(r.intersects(cand) for r in occupied_buf)
-            if not conflicts:
+            safe = not conflicts
+
+            # Compute edge-to-edge connector points for scoring
+            s, e = _connector_endpoints_edge_to_edge(cand, target_union)
+            crossings = _connector_crossing_score(s, e, score_obstacles)
+
+            # Distance bias: prefer the closer side (shorter horizontal run)
+            # (This is what makes "Beneficiary..." go left when target is on left.)
+            dx = abs(_center(cand).x - _center(target_union).x)
+
+            # Slight preference for a small dy (avoid extreme offsets)
+            dy_pen = abs(dy) * 0.02
+
+            # BIG penalty for unsafe collisions, but still allow if needed
+            score = (0 if safe else 10_000) + crossings * 100 + dx * 0.5 + dy_pen
+
+            if best is None or score < best[0]:
+                best = (score, cand, wrapped_text, fs, safe)
+
+            # If we found a safe candidate with 0 crossings, that's excellent: stop early
+            if safe and crossings == 0:
                 return cand, wrapped_text, fs, True
 
-    # If all conflict, place in widest margin at target_y anyway
+    if best:
+        _, cand, wrapped_text, fs, safe = best
+        return cand, wrapped_text, fs, safe
+
+    # Ultimate fallback
     side, x0_lane, x1_lane, lane_w = lanes[0]
     usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
     fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, usable_w)
@@ -364,7 +469,7 @@ def _place_annotation_in_margin(
 
 
 # ============================================================
-# Robust search helpers (from your earlier version)
+# Robust search helpers
 # ============================================================
 
 def _normalize_spaces(s: str) -> str:
@@ -503,10 +608,10 @@ def annotate_pdf_bytes(
             page1, targets, occupied_callouts, label
         )
 
-        # Always draw white backing (visibility)
+        # Always draw white backing
         page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
 
-        # ✅ CRITICAL: fit-guaranteed text insertion
+        # Fit-guaranteed text insertion
         final_rect, ret, final_fs = _insert_textbox_fit(
             page1,
             callout_rect,
@@ -518,17 +623,16 @@ def annotate_pdf_bytes(
             overlay=True,
         )
 
-        # connector (to union for single/union; to each for all)
-        def connect_to(rect: fitz.Rect):
-            _draw_straight_connector(page1, final_rect, rect)
+        # Connector(s) — now edge-to-edge
+        target_union = _union_rect(targets)
 
         if connect_policy == "all":
             for t in targets:
-                connect_to(t)
+                _draw_connector(page1, final_rect, t)
         elif connect_policy == "single":
-            connect_to(targets[0])
+            _draw_connector(page1, final_rect, targets[0])
         else:
-            connect_to(_union_rect(targets))
+            _draw_connector(page1, final_rect, target_union)
 
         occupied_callouts.append(final_rect)
 
