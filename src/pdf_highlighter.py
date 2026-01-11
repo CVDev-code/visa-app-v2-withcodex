@@ -198,17 +198,26 @@ def _intersects_any(r: fitz.Rect, others: List[fitz.Rect]) -> bool:
 
 def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, float, float]:
     """
-    Returns (fontsize, wrapped_text, width, height). Prefers 12 unless too tall.
+    Returns (fontsize, wrapped_text, width, height).
+    Wraps to fit box_width; if box_width is very narrow, falls back to 1 word per line.
     """
     text = (text or "").strip()
     if not text:
         return 12, "", box_width, 24.0
 
+    words = text.split()
+    usable_w = max(10.0, box_width - 10.0)
+
+    # If margin is tiny, force 1 word per line (your extreme stacking case)
+    if usable_w < 55.0 and len(words) > 1:
+        fs = 11 if 11 in FONT_SIZES else FONT_SIZES[-1]
+        lines = words[:]  # one per line
+        h = (len(lines) * fs * 1.22) + 10.0
+        return fs, "\n".join(lines), box_width, h
+
     for fs in FONT_SIZES:
-        words = text.split()
         lines: List[str] = []
         cur: List[str] = []
-        usable_w = max(10.0, box_width - 10.0)
 
         for w in words:
             trial = " ".join(cur + [w])
@@ -219,16 +228,18 @@ def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, 
                     lines.append(" ".join(cur))
                     cur = [w]
                 else:
+                    # single word doesn't fit; still place it on its own line
                     lines.append(w)
                     cur = []
         if cur:
             lines.append(" ".join(cur))
 
         h = (len(lines) * fs * 1.22) + 10.0
-        if h <= 86.0 or fs == 10:
+        # accept if reasonably compact
+        if h <= 110.0 or fs == FONT_SIZES[-1]:
             return fs, "\n".join(lines), box_width, h
 
-    return 10, text, box_width, 44.0
+    return FONT_SIZES[-1], text, box_width, 44.0
 
 
 # ============================================================
@@ -246,76 +257,93 @@ def _choose_best_margin_spot(
     target_union = _union_rect(targets)
     target_y = (target_union.y0 + target_union.y1) / 2
 
-    DEFAULT_MARGIN_W = 130.0
-    MIN_MARGIN_W = 62.0          # don't go narrower than this; otherwise fall back
-    CONTENT_PAD = GAP_FROM_TEXT_BLOCKS  # keep away from main text
+    DEFAULT_W = 130.0
+    MIN_W = 45.0  # allow very narrow; wrapping will stack
 
-    # --- Build "protected content" bbox from text blocks (main article text) ---
-    # We want to avoid overlapping the real readable article text.
-    # Heuristic: treat "substantial" text blocks as main content.
-    text_blocks: List[fitz.Rect] = []
+    # Build content bbox from OCR/text blocks (the area we refuse to cover)
     try:
-        for b in page.get_text("blocks"):
-            r = fitz.Rect(b[:4])
-            # Filter out tiny/footer-ish bits; keep substantial blocks
-            if r.width > pr.width * 0.45 and r.height > 18:
-                text_blocks.append(r)
+        blocks = page.get_text("blocks")
+        text_rects = [fitz.Rect(b[:4]) for b in blocks]
     except Exception:
-        text_blocks = []
+        text_rects = []
 
-    # If heuristic finds nothing, fall back to all text blocks
-    if not text_blocks:
-        try:
-            text_blocks = [fitz.Rect(b[:4]) for b in page.get_text("blocks")]
-        except Exception:
-            text_blocks = []
+    content_bbox = inflate_rect(_union_rect(text_rects), GAP_FROM_TEXT_BLOCKS)
 
-    content_bbox = inflate_rect(_union_rect(text_blocks), CONTENT_PAD)
-
-    # Inflate targets so we don't sit on the highlights
-    protected: List[fitz.Rect] = [content_bbox]
-    for t in targets:
-        protected.append(inflate_rect(t, GAP_FROM_HIGHLIGHTS))
-
+    # Keep away from highlights and other callouts
+    protected = [content_bbox] + [inflate_rect(t, GAP_FROM_HIGHLIGHTS) for t in targets]
     occupied_buf = [inflate_rect(o, GAP_BETWEEN_CALLOUTS) for o in occupied]
 
-    def in_bounds(y0: float, y1: float) -> bool:
-        return (y0 >= EDGE_PAD) and (y1 <= pr.height - EDGE_PAD)
+    # Compute available margin widths *outside* content bbox
+    left_avail = max(0.0, content_bbox.x0 - EDGE_PAD)
+    right_avail = max(0.0, (pr.width - EDGE_PAD) - content_bbox.x1)
 
-    # How much horizontal space is truly available in margins *outside the content bbox*
-    left_available = max(0.0, content_bbox.x0 - EDGE_PAD)
-    right_available = max(0.0, (pr.width - EDGE_PAD) - content_bbox.x1)
+    # Decide side; prefer the side with more space
+    side_order = []
+    if right_avail >= left_avail:
+        side_order = ["right", "left"]
+    else:
+        side_order = ["left", "right"]
 
-    # Candidate sides: (side_name, x_start, available_width)
-    sides = []
-    if left_available >= MIN_MARGIN_W:
-        sides.append(("left", EDGE_PAD, left_available))
-    if right_available >= MIN_MARGIN_W:
-        # place box entirely to the right of content_bbox
-        sides.append(("right", pr.width - EDGE_PAD - min(DEFAULT_MARGIN_W, right_available), right_available))
+    def clamp_y(y0: float, y1: float) -> Tuple[float, float]:
+        # not a search: just keep it on the page
+        if y0 < EDGE_PAD:
+            y1 += (EDGE_PAD - y0)
+            y0 = EDGE_PAD
+        if y1 > pr.height - EDGE_PAD:
+            y0 -= (y1 - (pr.height - EDGE_PAD))
+            y1 = pr.height - EDGE_PAD
+        return y0, y1
 
-    # If neither margin is wide enough, fall back to top/bottom margin bands
-    # (still avoids overlapping the main content bbox)
-    use_top_bottom = (len(sides) == 0)
-
-    # Vertical scan steps
-    search_steps = [0.0]
-    for i in range(1, 26):
-        search_steps.append(i * 10.0)
-        search_steps.append(i * -10.0)
-
-    def is_safe(cand: fitz.Rect) -> bool:
-        # Safe means: does NOT intersect protected content or occupied callouts
+    def safe(cand: fitz.Rect) -> bool:
+        # Safe = does not cover OCR/body text + does not overlap other callouts
+        # (We do NOT care about images/drawings; white background can cover them.)
         return (not _intersects_any(cand, protected)) and (not _intersects_any(cand, occupied_buf))
 
-    candidates: List[Tuple[float, fitz.Rect, str, int, bool]] = []
+    best = None  # (score, cand, wrapped, fs, safe)
 
-    # --- helper: score is distance + huge penalty if unsafe ---
-    def score_candidate(cand: fitz.Rect, ideal_y: float) -> Tuple[float, float]:
-        dist = abs(ideal_y - (cand.y0 + cand.y1) / 2)
-        safe = is_safe(cand)
-        score = dist + (0 if safe else 1_000_000)
-        return score, dist
+    for side in side_order:
+        if side == "left":
+            avail = left_avail
+            if avail < MIN_W:
+                continue
+            w = min(DEFAULT_W, avail)
+            x0 = EDGE_PAD
+        else:
+            avail = right_avail
+            if avail < MIN_W:
+                continue
+            w = min(DEFAULT_W, avail)
+            x0 = pr.width - EDGE_PAD - w
+
+        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, w)
+        y0 = target_y - h / 2
+        y1 = target_y + h / 2
+        y0, y1 = clamp_y(y0, y1)
+
+        cand = fitz.Rect(x0, y0, x0 + w_used, y1)
+
+        s = safe(cand)
+        # score: prefer safe, then prefer closer-to-ideal y (we're not moving y though),
+        # then prefer wider boxes (more readable)
+        score = (0 if s else 1_000_000) - (w_used * 0.01)
+
+        if best is None or score < best[0]:
+            best = (score, cand, wrapped, fs, s)
+
+        # If we found a safe placement, take it (no need to try the other side)
+        if s:
+            break
+
+    # If neither margin is viable, fall back to left but mark unsafe (no white background)
+    if best is None:
+        fs, wrapped, w_used, h = _optimize_layout_for_margin(label, DEFAULT_W)
+        y0, y1 = clamp_y(target_y - h / 2, target_y + h / 2)
+        cand = fitz.Rect(EDGE_PAD, y0, EDGE_PAD + w_used, y1)
+        return cand, wrapped, fs, False
+
+    _, cand, wrapped, fs, is_safe = best
+    return cand, wrapped, fs, is_safe
+
 
     # ============================================================
     # A) Normal case: place in left/right margin with dynamic width
