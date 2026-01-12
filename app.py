@@ -4,12 +4,9 @@ import zipfile
 import streamlit as st
 from dotenv import load_dotenv
 
-from src.pdf_text import (
-    extract_text_from_pdf_bytes,
-    extract_first_page_text_from_pdf_bytes,
-)
+from src.pdf_text import extract_text_from_pdf_bytes
 from src.metadata import (
-    extract_first_page_signals,
+    autodetect_metadata,
     make_csv_template,
     parse_metadata_csv,
     merge_metadata,
@@ -34,21 +31,6 @@ with st.sidebar:
     beneficiary_name = st.text_input("Beneficiary full name", value="")
     variants_raw = st.text_input("Name variants (comma-separated)", value="")
     beneficiary_variants = [v.strip() for v in variants_raw.split(",") if v.strip()]
-
-    st.subheader("Manual metadata (optional but improves outputs)")
-    source_url = st.text_input(
-        "Source URL (exact text as shown in PDF page 1)", value=""
-    )
-    venue_name = st.text_input(
-        "Venue / organisation name (for criteria 2/4)", value=""
-    )
-    org_name = st.text_input("Organisation name (for criterion 6)", value="")
-    performance_date = st.text_input(
-        "Performance date (exact text as shown in PDF)", value=""
-    )
-    salary_amount = st.text_input(
-        "Salary amount (for criterion 7) – e.g. $10,000", value=""
-    )
 
     st.subheader("Select O-1 criteria to extract")
     default_criteria = ["2_past", "2_future", "3", "4_past", "4_future"]
@@ -85,14 +67,11 @@ st.divider()
 # Session state
 # -------------------------
 if "ai_by_file" not in st.session_state:
-    # filename -> {"by_criterion": {"1":[{"quote","strength"}]}, "notes": "..."}
     st.session_state["ai_by_file"] = {}
 
 if "approval" not in st.session_state:
-    # filename -> criterion -> quote -> True/False
     st.session_state["approval"] = {}
 
-# ---- Mode B metadata state ----
 if "csv_metadata" not in st.session_state:
     st.session_state["csv_metadata"] = None  # filename -> dict
 
@@ -102,71 +81,68 @@ if "overrides_by_file" not in st.session_state:
 if "meta_by_file" not in st.session_state:
     st.session_state["meta_by_file"] = {}  # filename -> resolved dict
 
+if "regen_user_feedback" not in st.session_state:
+    st.session_state["regen_user_feedback"] = {}  # filename -> text
+
+
 # -------------------------
-# Metadata (Mode B): defaults + optional CSV + per-file overrides
+# Metadata: AI across all pages + per-file overrides + optional CSV for bulk
 # -------------------------
-st.subheader("🧾 Metadata (optional but improves highlighting)")
+st.subheader("🧾 Metadata (AI-detected, override if needed)")
 
-with st.expander("Batch defaults (apply to all PDFs)", expanded=True):
-    default_source_url = st.text_input("Default source URL (optional)", value="")
-    default_venue_name = st.text_input("Default venue / organization name (optional)", value="")
-    default_performance_date = st.text_input("Default performance date (optional)", value="")
-    default_salary_amount = st.text_input("Default salary amount (optional)", value="")
+csv_data = None
+if len(uploaded_files) > 1:
+    with st.expander("CSV metadata overrides (bulk mode)", expanded=False):
+        filenames = [f.name for f in uploaded_files]
+        template_bytes = make_csv_template(filenames)
 
-global_defaults = {
-    "source_url": default_source_url.strip() or None,
-    "venue_name": default_venue_name.strip() or None,
-    "performance_date": default_performance_date.strip() or None,
-    "salary_amount": default_salary_amount.strip() or None,
-}
+        st.download_button(
+            "⬇️ Download CSV template",
+            data=template_bytes,
+            file_name="o1_metadata_template.csv",
+            mime="text/csv",
+        )
 
-with st.expander("CSV metadata (optional bulk mode)", expanded=False):
-    filenames = [f.name for f in uploaded_files]
-    template_bytes = make_csv_template(filenames)
+        csv_file = st.file_uploader(
+            "Upload filled CSV (optional)",
+            type=["csv"],
+            accept_multiple_files=False,
+            key="metadata_csv_uploader",
+        )
 
-    st.download_button(
-        "⬇️ Download CSV template",
-        data=template_bytes,
-        file_name="o1_metadata_template.csv",
-        mime="text/csv",
-    )
+        if csv_file is not None:
+            try:
+                st.session_state["csv_metadata"] = parse_metadata_csv(csv_file.getvalue())
+                applied = len([fn for fn in filenames if fn in st.session_state["csv_metadata"]])
+                st.success(f"CSV loaded. Rows matched to {applied}/{len(filenames)} uploaded PDFs.")
+            except Exception as e:
+                st.session_state["csv_metadata"] = None
+                st.error(f"Could not parse CSV: {e}")
 
-    csv_file = st.file_uploader(
-        "Upload filled CSV (optional)",
-        type=["csv"],
-        accept_multiple_files=False,
-        key="metadata_csv_uploader",
-    )
+    csv_data = st.session_state.get("csv_metadata")
 
-    if csv_file is not None:
-        try:
-            st.session_state["csv_metadata"] = parse_metadata_csv(csv_file.getvalue())
-            applied = len([fn for fn in filenames if fn in st.session_state["csv_metadata"]])
-            st.success(f"CSV loaded. Rows matched to {applied}/{len(filenames)} uploaded PDFs.")
-        except Exception as e:
-            st.session_state["csv_metadata"] = None
-            st.error(f"Could not parse CSV: {e}")
-
-csv_data = st.session_state.get("csv_metadata")
-
-# Compute and store resolved metadata per file
+# Compute & show AI metadata per file, then allow override
 for f in uploaded_files:
-    first_page_text = extract_first_page_text_from_pdf_bytes(f.getvalue())
-    auto = extract_first_page_signals(first_page_text)
+    full_text = extract_text_from_pdf_bytes(f.getvalue())
+
+    # AI autodetect is the default base
+    try:
+        auto = autodetect_metadata(full_text)
+    except Exception as e:
+        auto = {"source_url": "", "venue_name": "", "ensemble_name": "", "performance_date": ""}
+        st.warning(f"Metadata AI failed for {f.name}: {e}")
 
     overrides = st.session_state["overrides_by_file"].get(f.name, {})
     resolved = merge_metadata(
         filename=f.name,
         auto=auto,
-        global_defaults=global_defaults,
         csv_data=csv_data,
         overrides=overrides,
     )
-
     st.session_state["meta_by_file"][f.name] = resolved
 
     with st.expander(f"Metadata overrides for: {f.name}", expanded=False):
-        st.caption("Leave blank to use CSV/global defaults/auto-detection.")
+        st.caption("AI is the default. Type anything below to override (or use CSV in bulk mode).")
 
         o = dict(overrides)
 
@@ -177,21 +153,21 @@ for f in uploaded_files:
         ).strip()
 
         o["venue_name"] = st.text_input(
-            "Venue / organization override",
+            "Venue / organisation override",
             value=o.get("venue_name", "") or (resolved.get("venue_name") or ""),
             key=f"venue_{f.name}",
+        ).strip()
+
+        o["ensemble_name"] = st.text_input(
+            "Ensemble / orchestra / choir override",
+            value=o.get("ensemble_name", "") or (resolved.get("ensemble_name") or ""),
+            key=f"ensemble_{f.name}",
         ).strip()
 
         o["performance_date"] = st.text_input(
             "Performance date override",
             value=o.get("performance_date", "") or (resolved.get("performance_date") or ""),
             key=f"date_{f.name}",
-        ).strip()
-
-        o["salary_amount"] = st.text_input(
-            "Salary amount override",
-            value=o.get("salary_amount", "") or (resolved.get("salary_amount") or ""),
-            key=f"money_{f.name}",
         ).strip()
 
         st.session_state["overrides_by_file"][f.name] = {k: v for k, v in o.items() if v}
@@ -206,7 +182,7 @@ st.divider()
 # -------------------------
 st.subheader("1️⃣ Generate criterion-tagged quote candidates (AI)")
 
-colA, colB, colC = st.columns([1, 1, 2])
+colA, colB = st.columns([1, 1])
 with colA:
     run_ai = st.button("Generate for all PDFs", type="primary")
 with colB:
@@ -227,6 +203,7 @@ if run_ai:
                 beneficiary_variants=beneficiary_variants,
                 selected_criteria_ids=selected_criteria_ids,
                 feedback=None,
+                user_feedback_text=None,
             )
             st.session_state["ai_by_file"][f.name] = data
 
@@ -260,11 +237,22 @@ for f in uploaded_files:
 
     by_criterion = data.get("by_criterion", {})
 
+    # NEW: user feedback box (this replaces the app “telling itself” feedback)
+    uf_key = f"user_feedback_{f.name}"
+    st.session_state["regen_user_feedback"].setdefault(f.name, "")
+    user_feedback = st.text_area(
+        "Optional instruction for regeneration (e.g. “focus only on critical acclaim and named roles; avoid generic praise”).",
+        value=st.session_state["regen_user_feedback"][f.name],
+        key=uf_key,
+        height=80,
+    )
+    st.session_state["regen_user_feedback"][f.name] = user_feedback
+
     regen_col1, regen_col2 = st.columns([1, 3])
     with regen_col1:
         regen_btn = st.button("Regenerate with my feedback", key=f"regen_{f.name}")
     with regen_col2:
-        st.caption("Tip: Reject weak quotes, then regenerate to tighten results for this PDF.")
+        st.caption("Tip: Approve/reject quotes below, add an instruction above, then regenerate.")
 
     if regen_btn:
         approved_examples = []
@@ -279,7 +267,7 @@ for f in uploaded_files:
             "rejected_examples": rejected_examples[:15],
         }
 
-        with st.spinner("Regenerating with feedback…"):
+        with st.spinner("Regenerating with your feedback…"):
             text = extract_text_from_pdf_bytes(f.getvalue())
             new_data = suggest_ovisa_quotes(
                 document_text=text,
@@ -287,6 +275,7 @@ for f in uploaded_files:
                 beneficiary_variants=beneficiary_variants,
                 selected_criteria_ids=selected_criteria_ids,
                 feedback=feedback,
+                user_feedback_text=user_feedback,
             )
 
         st.session_state["ai_by_file"][f.name] = new_data
@@ -350,11 +339,10 @@ def build_annotated_pdf_bytes(pdf_bytes: bytes, quotes: list[str], criterion_id:
     resolved = st.session_state["meta_by_file"].get(filename, {}) or {}
 
     meta = {
-        "source_url": resolved.get("source_url") or source_url,
-        "venue_name": resolved.get("venue_name") or venue_name,
-        "org_name": resolved.get("org_name") or org_name,
-        "performance_date": resolved.get("performance_date") or performance_date,
-        "salary_amount": resolved.get("salary_amount") or salary_amount,
+        "source_url": resolved.get("source_url") or "",
+        "venue_name": resolved.get("venue_name") or "",
+        "ensemble_name": resolved.get("ensemble_name") or "",
+        "performance_date": resolved.get("performance_date") or "",
         "beneficiary_name": beneficiary_name,
         "beneficiary_variants": beneficiary_variants,
     }
