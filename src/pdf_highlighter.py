@@ -631,6 +631,7 @@ def annotate_pdf_bytes(
     total_quote_hits = 0
     total_meta_hits = 0
     occupied_callouts: List[fitz.Rect] = []
+    connectors_to_draw = []  # list of tuples: (final_rect, connect_policy, targets)
 
     # A) Quote highlights (all pages)
     for page in doc:
@@ -707,15 +708,8 @@ def annotate_pdf_bytes(
             overlay=True,
         )
 
-        # Connectors
-        target_union = _union_rect(targets)
-               if connect_policy == "all":
-            for t in targets:
-                _draw_connector(page1, final_rect, t, avoid_rects=occupied_callouts)
-        elif connect_policy == "single":
-            _draw_connector(page1, final_rect, targets[0], avoid_rects=occupied_callouts)
-        else:
-            _draw_connector(page1, final_rect, target_union, avoid_rects=occupied_callouts)
+        # Store connectors for a second pass (so we can avoid ALL callouts, including ones placed later)
+        connectors_to_draw.append((final_rect, connect_policy, list(targets)))
 
         occupied_callouts.append(final_rect)
 
@@ -729,6 +723,23 @@ def annotate_pdf_bytes(
         connect_policy="all",
         also_try_variants=meta.get("beneficiary_variants") or [],
     )
+
+    # Second pass: draw connectors after ALL callouts exist,
+    # so we can avoid boxes that were placed later.
+    for final_rect, connect_policy, targets in connectors_to_draw:
+        target_union = _union_rect(targets)
+
+        # avoid every callout except the one we're connecting from
+        avoid_rects = [r for r in occupied_callouts if r != final_rect]
+
+    if connect_policy == "all":
+        for t in targets:
+            _draw_connector(page1, final_rect, t, avoid_rects=avoid_rects)
+    elif connect_policy == "single":
+        _draw_connector(page1, final_rect, targets[0], avoid_rects=avoid_rects)
+    else:
+        _draw_connector(page1, final_rect, target_union, avoid_rects=avoid_rects)
+
 
     out = io.BytesIO()
     doc.save(out)
