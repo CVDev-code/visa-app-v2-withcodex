@@ -349,9 +349,56 @@ def _connector_endpoints_edge_to_edge(callout_rect: fitz.Rect, target_rect: fitz
     end = _pull_back_point(start, end, ENDPOINT_PULLBACK)
     return start, end
 
+def _connector_endpoints_avoid_rects(
+    callout_rect: fitz.Rect,
+    target_rect: fitz.Rect,
+    avoid_rects: List[fitz.Rect],
+    *,
+    offsets: Optional[List[float]] = None,
+    avoid_pad: float = 1.5,
+) -> Tuple[fitz.Point, fitz.Point]:
+    """
+    Like _connector_endpoints_edge_to_edge, but will nudge the start/end y slightly
+    to avoid intersecting other callout rectangles. No multi-segment routing.
+    """
+    if offsets is None:
+        offsets = [0, -10, 10, -18, 18, -26, 26]  # simple nudges
 
-def _draw_connector(page: fitz.Page, callout_rect: fitz.Rect, target_rect: fitz.Rect):
-    s, e = _connector_endpoints_edge_to_edge(callout_rect, target_rect)
+    # Inflate avoid rects slightly so we don't "graze" outlines
+    avoid = [inflate_rect(r, avoid_pad) for r in (avoid_rects or [])]
+
+    # Base geometry
+    tc = _center(target_rect)
+    cc = _center(callout_rect)
+
+    def start_point(y: float) -> fitz.Point:
+        if callout_rect.x1 <= target_rect.x0:
+            return fitz.Point(callout_rect.x1, y)  # right edge
+        elif callout_rect.x0 >= target_rect.x1:
+            return fitz.Point(callout_rect.x0, y)  # left edge
+        else:
+            # vertical fallback
+            return fitz.Point(cc.x, callout_rect.y1 if cc.y < tc.y else callout_rect.y0)
+
+    def end_point(y: float) -> fitz.Point:
+        y_on_target = min(max(y, target_rect.y0 + 1.0), target_rect.y1 - 1.0)
+        if callout_rect.x1 <= target_rect.x0:
+            return fitz.Point(target_rect.x0, y_on_target)  # left edge
+        elif callout_rect.x0 >= target_rect.x1:
+            return fitz.Point(target_rect.x1, y_on_target)  # right edge
+        else:
+            x_on_target = min(max(cc.x, target_rect.x0 + 1.0), target_rect.x1 - 1.0)
+            return fitz.Point(x
+
+def _draw_connector(
+    page: fitz.Page,
+    callout_rect: fitz.Rect,
+    target_rect: fitz.Rect,
+    avoid_rects: Optional[List[fitz.Rect]] = None,
+):
+    s, e = _connector_endpoints_avoid_rects(
+        callout_rect, target_rect, avoid_rects or []
+    )
     page.draw_line(s, e, color=RED, width=LINE_WIDTH)
 
 
@@ -662,13 +709,13 @@ def annotate_pdf_bytes(
 
         # Connectors
         target_union = _union_rect(targets)
-        if connect_policy == "all":
+               if connect_policy == "all":
             for t in targets:
-                _draw_connector(page1, final_rect, t)
+                _draw_connector(page1, final_rect, t, avoid_rects=occupied_callouts)
         elif connect_policy == "single":
-            _draw_connector(page1, final_rect, targets[0])
+            _draw_connector(page1, final_rect, targets[0], avoid_rects=occupied_callouts)
         else:
-            _draw_connector(page1, final_rect, target_union)
+            _draw_connector(page1, final_rect, target_union, avoid_rects=occupied_callouts)
 
         occupied_callouts.append(final_rect)
 
