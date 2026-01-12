@@ -25,31 +25,8 @@ def _get_secret(name: str):
 
 
 # ============================================================
-# PART A: Mode B helpers (CSV + merge + basic first-page signals)
+# CSV helpers (bulk override mode)
 # ============================================================
-
-URL_REGEX = re.compile(r"(https?://[^\s)>\]]+)", re.IGNORECASE)
-
-
-def extract_first_page_signals(first_page_text: str) -> Dict:
-    """
-    Lightweight non-AI extraction from page-1 text.
-    Returns dict with any fields we can guess reliably.
-    """
-    text = first_page_text or ""
-    url = ""
-    m = URL_REGEX.search(text)
-    if m:
-        url = m.group(1).strip().rstrip(".,);]")
-
-    return {
-        "source_url": url or None,
-        "venue_name": None,
-        "performance_date": None,
-        "salary_amount": None,
-        "org_name": None,
-    }
-
 
 def make_csv_template(filenames: list[str]) -> bytes:
     """
@@ -58,22 +35,22 @@ def make_csv_template(filenames: list[str]) -> bytes:
     buf = io.StringIO()
     writer = csv.writer(buf)
     writer.writerow(
-        ["filename", "source_url", "venue_name", "performance_date", "org_name", "salary_amount"]
+        ["filename", "source_url", "venue_name", "ensemble_name", "performance_date"]
     )
     for fn in filenames:
-        writer.writerow([fn, "", "", "", "", ""])
+        writer.writerow([fn, "", "", "", ""])
     return buf.getvalue().encode("utf-8")
 
 
 def parse_metadata_csv(csv_bytes: bytes) -> Dict[str, Dict]:
     """
     Parses uploaded CSV and returns:
-      { filename: {source_url, venue_name, performance_date, org_name, salary_amount} }
+      { filename: {source_url, venue_name, ensemble_name, performance_date} }
     """
     text = csv_bytes.decode("utf-8", errors="replace")
     reader = csv.DictReader(io.StringIO(text))
 
-    required = {"filename", "source_url", "venue_name", "performance_date", "org_name", "salary_amount"}
+    required = {"filename", "source_url", "venue_name", "ensemble_name", "performance_date"}
     headers = set(reader.fieldnames or [])
     if not required.issubset(headers):
         raise ValueError(f"CSV must include headers: {sorted(required)}")
@@ -86,9 +63,8 @@ def parse_metadata_csv(csv_bytes: bytes) -> Dict[str, Dict]:
         out[fn] = {
             "source_url": (row.get("source_url") or "").strip() or None,
             "venue_name": (row.get("venue_name") or "").strip() or None,
+            "ensemble_name": (row.get("ensemble_name") or "").strip() or None,
             "performance_date": (row.get("performance_date") or "").strip() or None,
-            "org_name": (row.get("org_name") or "").strip() or None,
-            "salary_amount": (row.get("salary_amount") or "").strip() or None,
         }
     return out
 
@@ -96,16 +72,14 @@ def parse_metadata_csv(csv_bytes: bytes) -> Dict[str, Dict]:
 def merge_metadata(
     filename: str,
     auto: Optional[Dict] = None,
-    global_defaults: Optional[Dict] = None,
     csv_data: Optional[Dict[str, Dict]] = None,
     overrides: Optional[Dict] = None,
 ) -> Dict:
     """
     Merge priority (highest wins):
-      overrides > csv row > global defaults > auto
+      overrides > csv row > auto
     """
     auto = auto or {}
-    global_defaults = global_defaults or {}
     overrides = overrides or {}
     row = (csv_data or {}).get(filename, {}) if csv_data else {}
 
@@ -113,7 +87,6 @@ def merge_metadata(
         return (
             overrides.get(key)
             or row.get(key)
-            or global_defaults.get(key)
             or auto.get(key)
             or None
         )
@@ -121,19 +94,21 @@ def merge_metadata(
     return {
         "source_url": pick("source_url"),
         "venue_name": pick("venue_name"),
+        "ensemble_name": pick("ensemble_name"),
         "performance_date": pick("performance_date"),
-        "org_name": pick("org_name"),
-        "salary_amount": pick("salary_amount"),
     }
 
 
 # ============================================================
-# PART B: AI metadata auto-detect (OpenAI Python SDK v1+)
+# AI metadata auto-detect (all pages)
 # ============================================================
 
+URL_REGEX = re.compile(r"(https?://[^\s)>\]]+)", re.IGNORECASE)
+
+
 _AUTODETECT_SYSTEM = (
-    "You extract structured metadata from USCIS O-1 evidence PDFs. "
-    "Return ONLY valid JSON. If reminder: If a field is not found, use an empty string."
+    "You extract structured metadata from arts review / evidence PDFs for USCIS O-1 petitions. "
+    "Return ONLY valid JSON. If a field is not found, return an empty string for that field."
 )
 
 _AUTODETECT_USER = """Extract metadata from the following document text.
@@ -141,16 +116,14 @@ _AUTODETECT_USER = """Extract metadata from the following document text.
 Return JSON with keys:
 - source_url
 - venue_name
+- ensemble_name
 - performance_date
-- org_name
-- salary_amount
 
 Guidelines:
 - source_url: a URL visible in the document (prefer the publication URL).
-- performance_date: the date of the performance/event (as written).
-- venue_name: venue / organisation where performance occurs.
-- org_name: organisation relevant to recognition (criterion 6).
-- salary_amount: any explicit compensation figure (e.g. $10,000).
+- performance_date: the date of the performance/event (as written in the document).
+- venue_name: venue / hall / festival / organisation hosting the performance.
+- ensemble_name: orchestra/ensemble/choir/company performing (if stated).
 
 DOCUMENT TEXT:
 {text}
@@ -161,20 +134,9 @@ def autodetect_metadata(
     document_text: str,
     *,
     model: Optional[str] = None,
-    max_chars: int = 20000,
+    max_chars: int = 25000,
     debug: bool = False,
 ) -> Dict:
-    """
-    Optional AI step: extracts metadata candidates from document text.
-
-    Parameters:
-      - model: override model name (defaults to OPENAI_MODEL or gpt-4o-mini)
-      - max_chars: truncate input text for cost/speed
-      - debug: if True, raise exceptions instead of swallowing them
-
-    Returns dict with keys:
-      source_url, venue_name, performance_date, org_name, salary_amount
-    """
     api_key = _get_secret("OPENAI_API_KEY")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
@@ -182,8 +144,10 @@ def autodetect_metadata(
     chosen_model = model or _get_secret("OPENAI_MODEL") or "gpt-4o-mini"
     client = OpenAI(api_key=api_key)
 
-    prompt = _AUTODETECT_USER.format(text=(document_text or "")[:max_chars])
+    text = (document_text or "")
+    prompt = _AUTODETECT_USER.format(text=text[:max_chars])
 
+    data = {}
     try:
         resp = client.chat.completions.create(
             model=chosen_model,
@@ -193,12 +157,9 @@ def autodetect_metadata(
             ],
             response_format={"type": "json_object"},
         )
-
         raw = resp.choices[0].message.content or "{}"
         data = json.loads(raw)
-
     except Exception as e:
-        # Streamlit Cloud logs will capture prints
         print(f"[autodetect_metadata] Error: {e}")
         if debug:
             raise
@@ -208,10 +169,16 @@ def autodetect_metadata(
         val = data.get(key, "")
         return str(val or "").strip()
 
+    # Lightweight URL fallback (helps even if model misses it)
+    url = s("source_url")
+    if not url:
+        m = URL_REGEX.search(text)
+        if m:
+            url = m.group(1).strip().rstrip(".,);]")
+
     return {
-        "source_url": s("source_url"),
+        "source_url": url or "",
         "venue_name": s("venue_name"),
+        "ensemble_name": s("ensemble_name"),
         "performance_date": s("performance_date"),
-        "org_name": s("org_name"),
-        "salary_amount": s("salary_amount"),
     }
