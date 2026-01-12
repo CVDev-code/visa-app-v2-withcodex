@@ -24,6 +24,7 @@ def suggest_ovisa_quotes(
     beneficiary_variants: List[str],
     selected_criteria_ids: List[str],
     feedback: Optional[Dict] = None,
+    user_feedback_text: Optional[str] = None,
 ) -> Dict:
     """
     Returns:
@@ -31,8 +32,11 @@ def suggest_ovisa_quotes(
         "by_criterion": {"1":[{"quote":"...","strength":"high"}], ...},
         "notes": "..."
       }
+
     feedback optional:
       {"approved_examples":[...], "rejected_examples":[...]}
+    user_feedback_text optional:
+      a free-text instruction from the user
     """
     api_key = _get_secret("OPENAI_API_KEY")
     if not api_key:
@@ -51,12 +55,16 @@ def suggest_ovisa_quotes(
     approved = (feedback or {}).get("approved_examples", [])
     rejected = (feedback or {}).get("rejected_examples", [])
 
+    uf = (user_feedback_text or "").strip()
+    user_feedback_block = f"USER FEEDBACK:\n{uf}" if uf else "None"
+
     prompt = USER_PROMPT_TEMPLATE.format(
         beneficiary_name=beneficiary_name.strip(),
         beneficiary_variants=", ".join([v.strip() for v in beneficiary_variants if v.strip()]) or "None",
         selected_criteria_block=selected_criteria_block,
         approved_examples="\n".join(approved) if approved else "None",
         rejected_examples="\n".join(rejected) if rejected else "None",
+        user_feedback=user_feedback_block,
         text=document_text,
     )
 
@@ -81,7 +89,6 @@ def suggest_ovisa_quotes(
         )
         raw = getattr(resp, "output_text", None)
         if not raw:
-            # Fallback path for some SDK builds
             try:
                 raw = resp.output[0].content[0].text
             except Exception:
@@ -96,7 +103,7 @@ def suggest_ovisa_quotes(
     if not isinstance(by_criterion, dict):
         by_criterion = {}
 
-    # Normalize: ensure selected criteria exist and items have quote/strength
+    # Normalize
     cleaned = {}
     for cid in selected_criteria_ids:
         items = by_criterion.get(cid, [])
