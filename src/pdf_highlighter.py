@@ -14,6 +14,14 @@ LINE_WIDTH = 1.6
 FONTNAME = "Times-Bold"
 FONT_SIZES = [12, 11, 10, 9, 8]
 
+# ---- footer no-go zone (page coordinates) ----
+NO_GO_RECT = fitz.Rect(
+    21.00,   # left
+    816.00,  # top
+    411.26,  # right
+    830.00   # bottom
+)
+
 # ---- spacing knobs ----
 EDGE_PAD = 12.0
 GAP_FROM_TEXT_BLOCKS = 8.0
