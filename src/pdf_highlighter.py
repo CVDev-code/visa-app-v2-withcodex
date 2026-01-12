@@ -82,6 +82,14 @@ def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect, steps: int 
     return False
 
 
+def _shift_rect_up(rect: fitz.Rect, shift: float, min_y: float = 2.0) -> fitz.Rect:
+    if shift <= 0:
+        return fitz.Rect(rect)
+    h = rect.y1 - rect.y0
+    new_y1 = max(min_y + h, rect.y1 - shift)
+    return fitz.Rect(rect.x0, new_y1 - h, rect.x1, new_y1)
+
+
 # ============================================================
 # Text area detection (dynamic margins)
 # ============================================================
@@ -363,6 +371,7 @@ def _place_annotation_in_margin(
 
     # NEW: don't let callout land on top of the highlighted thing (e.g. URL footer target)
     target_no_go = inflate_rect(target_union, GAP_FROM_HIGHLIGHTS)
+    footer_no_go = fitz.Rect(NO_GO_RECT) & pr
 
     MIN_CALLOUT_WIDTH = 55.0
     MAX_CALLOUT_WIDTH = 180.0
@@ -428,6 +437,10 @@ def _place_annotation_in_margin(
             if cand.intersects(text_area):
                 continue
 
+            if footer_no_go.width > 0 and footer_no_go.height > 0:
+                if cand.intersects(footer_no_go):
+                    continue
+            
             # NEW: never cover the target highlight (prevents URL being covered)
             if cand.intersects(target_no_go):
                 continue
@@ -470,6 +483,10 @@ def _place_annotation_in_margin(
         x1 = min(x1_lane, x0 + w_used)
 
     cand = fitz.Rect(x0, y0, x1, y1)
+    if footer_no_go.width > 0 and footer_no_go.height > 0:
+        if cand.intersects(footer_no_go):
+            shift = (cand.y1 - footer_no_go.y0) + EDGE_BUFFER
+            cand = _shift_rect_up(cand, shift, min_y=EDGE_BUFFER)
     return cand, wrapped_text, fs, False
 
 
@@ -613,6 +630,12 @@ def annotate_pdf_bytes(
             page1, targets, occupied_callouts, label
         )
 
+        footer_no_go = fitz.Rect(NO_GO_RECT) & page1.rect
+        if footer_no_go.width > 0 and footer_no_go.height > 0:
+            if callout_rect.intersects(footer_no_go):
+                shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
+                callout_rect = _shift_rect_up(callout_rect, shift, min_y=EDGE_PAD)
+        
         # Always draw white backing
         page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
 
