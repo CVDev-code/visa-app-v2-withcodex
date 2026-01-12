@@ -71,8 +71,8 @@ def _pull_back_point(from_pt: fitz.Point, to_pt: fitz.Point, dist: float) -> fit
     return fitz.Point(to_pt.x + ux * dist, to_pt.y + uy * dist)
 
 
-def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect, steps: int = 28) -> bool:
-    """Sample points along segment; good enough for scoring line crossings."""
+def _segment_hits_rect(p1: fitz.Point, p2: fitz.Point, r: fitz.Rect, steps: int = 60) -> bool:
+    """Sample points along segment; higher steps = more sensitive intersection detection."""
     for i in range(steps + 1):
         t = i / steps
         x = p1.x + (p2.x - p1.x) * t
@@ -259,11 +259,9 @@ def _insert_textbox_fit(
     Returns (final_rect, ret, final_fontsize).
     """
     pr = page.rect
-    r = fitz.Rect(rect)
+    r = _ensure_min_size(fitz.Rect(rect), pr)
     fs = int(fontsize)
 
-    # Absolute safety: repair rect before any insert attempt
-    r = _ensure_min_size(r, pr)
     if not _rect_is_valid(r):
         return r, -1.0, fs
 
@@ -296,7 +294,7 @@ def _insert_textbox_fit(
     shrink_tries = 0
     while ret < 0 and fs > FONT_SIZES[-1] and shrink_tries < 4:
         fs -= 1
-        r = fitz.Rect(rect)
+        r = _ensure_min_size(fitz.Rect(rect), pr)
         ret = attempt(r, fs)
 
         it = 0
@@ -315,7 +313,7 @@ def _insert_textbox_fit(
 
 
 # ============================================================
-# Edge-to-edge connector
+# Connectors (simple + nudges to avoid other callouts)
 # ============================================================
 
 def _connector_endpoints_edge_to_edge(callout_rect: fitz.Rect, target_rect: fitz.Rect) -> Tuple[fitz.Point, fitz.Point]:
@@ -328,10 +326,7 @@ def _connector_endpoints_edge_to_edge(callout_rect: fitz.Rect, target_rect: fitz
     elif callout_rect.x0 >= target_rect.x1:
         start = fitz.Point(callout_rect.x0, cy)
     else:
-        if cc.y < tc.y:
-            start = fitz.Point(cc.x, callout_rect.y1)
-        else:
-            start = fitz.Point(cc.x, callout_rect.y0)
+        start = fitz.Point(cc.x, callout_rect.y1 if cc.y < tc.y else callout_rect.y0)
 
     y_on_target = min(max(cy, target_rect.y0 + 1.0), target_rect.y1 - 1.0)
 
@@ -341,13 +336,11 @@ def _connector_endpoints_edge_to_edge(callout_rect: fitz.Rect, target_rect: fitz
         end = fitz.Point(target_rect.x1, y_on_target)
     else:
         x_on_target = min(max(cc.x, target_rect.x0 + 1.0), target_rect.x1 - 1.0)
-        if cc.y < tc.y:
-            end = fitz.Point(x_on_target, target_rect.y0)
-        else:
-            end = fitz.Point(x_on_target, target_rect.y1)
+        end = fitz.Point(x_on_target, target_rect.y0 if cc.y < tc.y else target_rect.y1)
 
     end = _pull_back_point(start, end, ENDPOINT_PULLBACK)
     return start, end
+
 
 def _connector_endpoints_avoid_rects(
     callout_rect: fitz.Rect,
@@ -355,19 +348,17 @@ def _connector_endpoints_avoid_rects(
     avoid_rects: List[fitz.Rect],
     *,
     offsets: Optional[List[float]] = None,
-    avoid_pad: float = 1.5,
+    avoid_pad: float = 2.5,
 ) -> Tuple[fitz.Point, fitz.Point]:
     """
-    Like _connector_endpoints_edge_to_edge, but will nudge the start/end y slightly
-    to avoid intersecting other callout rectangles. No multi-segment routing.
+    Straight connector with tiny nudges (no multi-segment routing).
+    Only tries small y-shifts to avoid intersecting other callout boxes.
     """
     if offsets is None:
-        offsets = [0, -10, 10, -18, 18, -26, 26]  # simple nudges
+        offsets = [0, -10, 10, -18, 18, -26, 26, -34, 34]
 
-    # Inflate avoid rects slightly so we don't "graze" outlines
     avoid = [inflate_rect(r, avoid_pad) for r in (avoid_rects or [])]
 
-    # Base geometry
     tc = _center(target_rect)
     cc = _center(callout_rect)
 
@@ -377,7 +368,6 @@ def _connector_endpoints_avoid_rects(
         elif callout_rect.x0 >= target_rect.x1:
             return fitz.Point(callout_rect.x0, y)  # left edge
         else:
-            # vertical fallback
             return fitz.Point(cc.x, callout_rect.y1 if cc.y < tc.y else callout_rect.y0)
 
     def end_point(y: float) -> fitz.Point:
@@ -388,7 +378,27 @@ def _connector_endpoints_avoid_rects(
             return fitz.Point(target_rect.x1, y_on_target)  # right edge
         else:
             x_on_target = min(max(cc.x, target_rect.x0 + 1.0), target_rect.x1 - 1.0)
-            return fitz.Point(x
+            return fitz.Point(x_on_target, target_rect.y0 if cc.y < tc.y else target_rect.y1)
+
+    def hits_any(p1: fitz.Point, p2: fitz.Point) -> bool:
+        for r in avoid:
+            if _segment_hits_rect(p1, p2, r):
+                return True
+        return False
+
+    for dy in offsets:
+        y_try = cc.y + dy
+        y_try = min(max(y_try, callout_rect.y0 + 2.0), callout_rect.y1 - 2.0)
+
+        s = start_point(y_try)
+        e = end_point(y_try)
+        e = _pull_back_point(s, e, ENDPOINT_PULLBACK)
+
+        if not hits_any(s, e):
+            return s, e
+
+    return _connector_endpoints_edge_to_edge(callout_rect, target_rect)
+
 
 def _draw_connector(
     page: fitz.Page,
@@ -396,9 +406,7 @@ def _draw_connector(
     target_rect: fitz.Rect,
     avoid_rects: Optional[List[fitz.Rect]] = None,
 ):
-    s, e = _connector_endpoints_avoid_rects(
-        callout_rect, target_rect, avoid_rects or []
-    )
+    s, e = _connector_endpoints_avoid_rects(callout_rect, target_rect, avoid_rects or [])
     page.draw_line(s, e, color=RED, width=LINE_WIDTH)
 
 
@@ -467,11 +475,9 @@ def _place_annotation_in_margin(
             y0 = target_y + dy - h_needed / 2.0
             y1 = target_y + dy + h_needed / 2.0
 
-            # clamp
             y0 = max(EDGE_BUFFER, y0)
             y1 = min(pr.height - EDGE_BUFFER, y1)
 
-            # prevent collapse/inversion after clamping
             if (y1 - y0) < MIN_H:
                 y1 = min(pr.height - EDGE_BUFFER, y0 + MIN_H)
                 if (y1 - y0) < MIN_H:
@@ -484,10 +490,8 @@ def _place_annotation_in_margin(
                 x0 = x0_lane + 5.0
                 x1 = min(x1_lane, x0 + w_used)
 
-            cand = fitz.Rect(x0, y0, x1, y1)
-            cand = _ensure_min_size(cand, pr)
+            cand = _ensure_min_size(fitz.Rect(x0, y0, x1, y1), pr)
 
-            # stay out of highlights / body text / footer no-go
             if cand.intersects(target_no_go):
                 continue
             if cand.intersects(text_area):
@@ -512,7 +516,6 @@ def _place_annotation_in_margin(
         _, cand, wrapped_text, fs, safe = best
         return cand, wrapped_text, fs, safe
 
-    # last resort fallback
     side, x0_lane, x1_lane, lane_w = lanes[0]
     usable_w = min(MAX_CALLOUT_WIDTH, lane_w)
     fs, wrapped_text, w_used, h_needed = _optimize_layout_for_margin(label, usable_w)
@@ -532,7 +535,6 @@ def _place_annotation_in_margin(
 
     cand = fitz.Rect(x0, y0, x1, y1)
 
-    # if it overlaps footer, shift up
     if footer_no_go.width > 0 and footer_no_go.height > 0 and cand.intersects(footer_no_go):
         shift = (cand.y1 - footer_no_go.y0) + EDGE_BUFFER
         cand = _shift_rect_up(cand, shift, min_y=EDGE_BUFFER)
@@ -678,7 +680,7 @@ def annotate_pdf_bytes(
             page1.draw_rect(t, color=RED, width=BOX_WIDTH)
         total_meta_hits += len(targets)
 
-        callout_rect, wrapped_text, fs, safe = _place_annotation_in_margin(
+        callout_rect, wrapped_text, fs, _safe = _place_annotation_in_margin(
             page1, targets, occupied_callouts, label
         )
 
@@ -688,7 +690,6 @@ def annotate_pdf_bytes(
             shift = (callout_rect.y1 - footer_no_go.y0) + EDGE_PAD
             callout_rect = _shift_rect_up(callout_rect, shift, min_y=EDGE_PAD)
 
-        # HARD SAFETY: repair + validate before drawing/inserting
         callout_rect = _ensure_min_size(callout_rect, page1.rect)
         if not _rect_is_valid(callout_rect):
             return
@@ -697,7 +698,7 @@ def annotate_pdf_bytes(
         page1.draw_rect(callout_rect, color=WHITE, fill=WHITE, overlay=True)
 
         # Text insertion
-        final_rect, ret, final_fs = _insert_textbox_fit(
+        final_rect, _ret, _final_fs = _insert_textbox_fit(
             page1,
             callout_rect,
             wrapped_text,
@@ -708,9 +709,10 @@ def annotate_pdf_bytes(
             overlay=True,
         )
 
-        # Store connectors for a second pass (so we can avoid ALL callouts, including ones placed later)
+        # Store connectors for second pass
         connectors_to_draw.append((final_rect, connect_policy, list(targets)))
 
+        # Store callout for avoidance
         occupied_callouts.append(final_rect)
 
     _do_job("Original source of publication.", meta.get("source_url"), connect_policy="union")
@@ -724,22 +726,18 @@ def annotate_pdf_bytes(
         also_try_variants=meta.get("beneficiary_variants") or [],
     )
 
-    # Second pass: draw connectors after ALL callouts exist,
-    # so we can avoid boxes that were placed later.
+    # Second pass: draw connectors after ALL callouts exist
     for final_rect, connect_policy, targets in connectors_to_draw:
         target_union = _union_rect(targets)
-
-        # avoid every callout except the one we're connecting from
         avoid_rects = [r for r in occupied_callouts if r != final_rect]
 
-    if connect_policy == "all":
-        for t in targets:
-            _draw_connector(page1, final_rect, t, avoid_rects=avoid_rects)
-    elif connect_policy == "single":
-        _draw_connector(page1, final_rect, targets[0], avoid_rects=avoid_rects)
-    else:
-        _draw_connector(page1, final_rect, target_union, avoid_rects=avoid_rects)
-
+        if connect_policy == "all":
+            for t in targets:
+                _draw_connector(page1, final_rect, t, avoid_rects=avoid_rects)
+        elif connect_policy == "single":
+            _draw_connector(page1, final_rect, targets[0], avoid_rects=avoid_rects)
+        else:
+            _draw_connector(page1, final_rect, target_union, avoid_rects=avoid_rects)
 
     out = io.BytesIO()
     doc.save(out)
