@@ -12,7 +12,7 @@ WHITE = (1, 1, 1)
 BOX_WIDTH = 1.7
 LINE_WIDTH = 1.6
 FONTNAME = "Times-Bold"
-FONT_SIZES = [12, 11, 10, 9, 8]
+FONT_SIZES = [11, 10, 9, 8]
 
 # ---- footer no-go zone (page coordinates; PyMuPDF = top-left origin) ----
 NO_GO_RECT = fitz.Rect(
@@ -194,7 +194,7 @@ def _detect_actual_text_area(page: fitz.Page) -> fitz.Rect:
 def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, float, float]:
     text = (text or "").strip()
     if not text:
-        return 12, "", box_width, 24.0
+        return 11, "", box_width, 24.0
 
     words = text.split()
     max_h = 180.0
