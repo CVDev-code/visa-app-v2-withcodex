@@ -38,6 +38,8 @@ _MAX_TERM = 600
 _CHUNK = 60
 _CHUNK_OVERLAP = 18
 
+PAST_CRITERIA = {"2_past", "4_past"}
+FUTURE_CRITERIA = {"2_future", "4_future"}
 
 # ============================================================
 # Geometry helpers
@@ -833,7 +835,15 @@ def annotate_pdf_bytes(
     _do_job("Original source of publication.", meta.get("source_url"), connect_policy="all")
     _do_job("Venue is a distinguished organization.", meta.get("venue_name"), connect_policy="all")
     _do_job("Ensemble is a distinguished organization.", meta.get("ensemble_name"), connect_policy="all")
-    _do_job("Performance date.", meta.get("performance_date"), connect_policy="all")
+    
+    if criterion_id in PAST_CRITERIA:
+        performance_label = "Past performance date."
+    elif criterion_id in FUTURE_CRITERIA:
+        performance_label = "Future performance date."
+    else:
+        performance_label = "Performance date."
+
+    _do_job(performance_label, meta.get("performance_date"), connect_policy="all")
 
     # Beneficiary targets (still value-driven)
     _do_job(
