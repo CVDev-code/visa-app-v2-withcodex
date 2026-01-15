@@ -831,13 +831,13 @@ def annotate_pdf_bytes(
 
     # --- Meta labels (now includes ensemble) ---
     _do_job("Original source of publication.", meta.get("source_url"), connect_policy="all")
-    _do_job("Venue / distinguished organisation.", meta.get("venue_name"), connect_policy="all")
-    _do_job("Ensemble / performing organisation.", meta.get("ensemble_name"), connect_policy="all")
+    _do_job("Venue is a distinguished organization.", meta.get("venue_name"), connect_policy="all")
+    _do_job("Ensemble is a distinguished organization.", meta.get("ensemble_name"), connect_policy="all")
     _do_job("Performance date.", meta.get("performance_date"), connect_policy="all")
 
     # Beneficiary targets (still value-driven)
     _do_job(
-        "Beneficiary lead role evidence.",
+        "Beneficiary named as a lead role.",
         meta.get("beneficiary_name"),
         connect_policy="all",
         also_try_variants=meta.get("beneficiary_variants") or [],
