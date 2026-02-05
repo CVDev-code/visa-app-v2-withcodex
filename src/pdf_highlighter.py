@@ -1,8 +1,6 @@
 import io
 import math
 import re
-import calendar
-from datetime import datetime
 from typing import Dict, List, Tuple, Optional
 
 import fitz  # PyMuPDF
@@ -14,7 +12,7 @@ WHITE = (1, 1, 1)
 BOX_WIDTH = 1.7
 LINE_WIDTH = 1.6
 FONTNAME = "Times-Bold"
-FONT_SIZES = [11, 10, 9, 8]
+FONT_SIZES = [12, 11, 10, 9, 8]
 
 # ---- footer no-go zone (page coordinates; PyMuPDF = top-left origin) ----
 NO_GO_RECT = fitz.Rect(
@@ -39,84 +37,6 @@ ARROW_HALF_WIDTH = 4.5
 _MAX_TERM = 600
 _CHUNK = 60
 _CHUNK_OVERLAP = 18
-
-PAST_CRITERIA = {"2_past", "4_past"}
-FUTURE_CRITERIA = {"2_future", "4_future"}
-
-_DATE_INPUT_FORMATS = [
-    "%B %d, %Y",
-    "%b %d, %Y",
-    "%B %d %Y",
-    "%b %d %Y",
-    "%d %B %Y",
-    "%d %b %Y",
-    "%m/%d/%Y",
-    "%d/%m/%Y",
-    "%m/%d/%y",
-    "%d/%m/%y",
-    "%m-%d-%Y",
-    "%d-%m-%Y",
-    "%Y-%m-%d",
-]
-
-
-def _normalize_date_string(value: str) -> str:
-    cleaned = re.sub(r"\b(\d{1,2})(st|nd|rd|th)\b", r"\1", value, flags=re.IGNORECASE)
-    cleaned = re.sub(r"\s+", " ", cleaned)
-    return cleaned.strip()
-
-
-def _generate_date_variants(value: Optional[str]) -> List[str]:
-    if not value:
-        return []
-
-    cleaned = _normalize_date_string(str(value))
-    if not cleaned:
-        return []
-
-    parsed = None
-    for fmt in _DATE_INPUT_FORMATS:
-        try:
-            parsed = datetime.strptime(cleaned, fmt)
-            break
-        except ValueError:
-            continue
-
-    if not parsed:
-        return []
-
-    def _strip_leading_zero(formatted: str, sep: str) -> str:
-        parts = formatted.split(sep)
-        return sep.join(part.lstrip("0") or "0" for part in parts)
-
-    variants = {
-        parsed.strftime("%B %d, %Y"),
-        parsed.strftime("%b %d, %Y"),
-        parsed.strftime("%B %d %Y"),
-        parsed.strftime("%b %d %Y"),
-        parsed.strftime("%d %B %Y"),
-        parsed.strftime("%d %b %Y"),
-        parsed.strftime("%m/%d/%Y"),
-        parsed.strftime("%d/%m/%Y"),
-        parsed.strftime("%m/%d/%y"),
-        parsed.strftime("%d/%m/%y"),
-        parsed.strftime("%m-%d-%Y"),
-        parsed.strftime("%d-%m-%Y"),
-        parsed.strftime("%Y-%m-%d"),
-    }
-
-    variants.update(
-        {
-            _strip_leading_zero(parsed.strftime("%m/%d/%Y"), "/"),
-            _strip_leading_zero(parsed.strftime("%d/%m/%Y"), "/"),
-            _strip_leading_zero(parsed.strftime("%m/%d/%y"), "/"),
-            _strip_leading_zero(parsed.strftime("%d/%m/%y"), "/"),
-            _strip_leading_zero(parsed.strftime("%m-%d-%Y"), "-"),
-            _strip_leading_zero(parsed.strftime("%d-%m-%Y"), "-"),
-        }
-    )
-
-    return sorted({v.strip() for v in variants if v.strip()})
 
 
 # ============================================================
@@ -274,7 +194,7 @@ def _detect_actual_text_area(page: fitz.Page) -> fitz.Rect:
 def _optimize_layout_for_margin(text: str, box_width: float) -> Tuple[int, str, float, float]:
     text = (text or "").strip()
     if not text:
-        return 11, "", box_width, 24.0
+        return 12, "", box_width, 24.0
 
     words = text.split()
     max_h = 180.0
@@ -911,27 +831,13 @@ def annotate_pdf_bytes(
 
     # --- Meta labels (now includes ensemble) ---
     _do_job("Original source of publication.", meta.get("source_url"), connect_policy="all")
-    _do_job("Venue is a distinguished organization.", meta.get("venue_name"), connect_policy="all")
-    _do_job("Ensemble is a distinguished organization.", meta.get("ensemble_name"), connect_policy="all")
-    
-    if criterion_id in PAST_CRITERIA:
-        performance_label = "Past performance date."
-    elif criterion_id in FUTURE_CRITERIA:
-        performance_label = "Future performance date."
-    else:
-        performance_label = "Performance date."
-
-    performance_date_variants = _generate_date_variants(meta.get("performance_date"))
-    _do_job(
-        performance_label,
-        meta.get("performance_date"),
-        connect_policy="all",
-        also_try_variants=performance_date_variants,
-    )
+    _do_job("Venue / distinguished organisation.", meta.get("venue_name"), connect_policy="all")
+    _do_job("Ensemble / performing organisation.", meta.get("ensemble_name"), connect_policy="all")
+    _do_job("Performance date.", meta.get("performance_date"), connect_policy="all")
 
     # Beneficiary targets (still value-driven)
     _do_job(
-        "Beneficiary named as a lead role.",
+        "Beneficiary lead role evidence.",
         meta.get("beneficiary_name"),
         connect_policy="all",
         also_try_variants=meta.get("beneficiary_variants") or [],
