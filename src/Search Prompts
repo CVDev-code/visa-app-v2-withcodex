@@ -1,0 +1,277 @@
+"""
+Web Search Prompt Templates for O-1 Visa Research
+
+CUSTOMIZE THESE PROMPTS to improve search results.
+These are what get sent to ChatGPT's web search.
+
+Think of these as "what you'd type into ChatGPT manually."
+"""
+
+# ============================================================
+# SEARCH PROMPT TEMPLATES
+# ============================================================
+
+SEARCH_PROMPTS = {
+    "1": """Find {target_count} sources showing {artist_name} has won significant national or international awards or prizes.
+
+USCIS Requirements for O-1:
+- Named, prestigious awards (Grammy, Pulitzer, MacArthur, major international competitions)
+- Official announcements from award organizations or major publications
+- NOT nominations, "best of" lists, or local community awards
+
+Search for:
+- Award announcements from official organizations
+- Coverage in major newspapers (NYT, Guardian, Washington Post, etc.)
+- Industry publication reports (e.g., Gramophone for classical music, Billboard for popular music)
+- Competition results from prestigious contests
+
+CUSTOMIZE: Add specific awards relevant to your artist's field:
+- Classical: Grammy, BBC Music Magazine Awards, Gramophone Awards
+- Jazz: Grammy, NEA Jazz Masters, DownBeat Critics Poll
+- Opera: Grammy, Olivier Awards, International Opera Awards
+- Popular: Grammy, Billboard Music Awards, American Music Awards
+
+For each source found, provide:
+- [Full Article Title](complete URL)
+- Brief description of the award
+- Why this meets O-1 standards
+
+IMPORTANT: Include the complete URL for each source.""",
+
+    "3": """Find {target_count} critical reviews or feature articles about {artist_name} from prestigious publications.
+
+USCIS Requirements for O-1:
+- Reviews from major publications (New York Times, Guardian, Gramophone, BBC, NPR, etc.)
+- Feature articles demonstrating distinguished reputation
+- Critical analysis, not just event listings or brief mentions
+
+Search for:
+- Concert or performance reviews
+- Album or recording reviews  
+- Feature articles or profiles
+- Critical essays about the artist's work
+
+PRIORITIZE THESE SOURCES (add more as needed):
+- General prestige: New York Times, Washington Post, Guardian, Financial Times, Wall Street Journal
+- Classical: Gramophone, BBC Music Magazine, The Strad, Opera News, Bachtrack
+- Jazz: DownBeat, JazzTimes, All About Jazz
+- Popular: Rolling Stone, Pitchfork, Billboard, Variety
+- NPR, BBC (all genres)
+
+For each review found, provide:
+- [Article Title](complete URL)
+- Publication name and date
+- Key excerpt showing critical acclaim
+
+IMPORTANT: Include complete URLs. Prioritize prestigious publications over local papers.""",
+
+    "2_past": """Find {target_count} sources showing {artist_name} had lead or starring roles in PAST productions or events with distinguished reputation.
+
+Search for:
+- Past performances at major venues (Carnegie Hall, Royal Opera House, Sydney Opera House, etc.)
+- Lead roles in distinguished productions
+- Starring engagements with prestigious organizations
+- Festival appearances at major events
+
+CUSTOMIZE VENUES BY FIELD:
+- Classical: Carnegie Hall, Royal Albert Hall, Berlin Philharmonie, Vienna Musikverein
+- Opera: Metropolitan Opera, Royal Opera House, La Scala, Paris Opera, Glyndebourne
+- Jazz: Blue Note, Village Vanguard, Montreux Jazz Festival, Newport Jazz Festival
+- Popular: Madison Square Garden, O2 Arena, Red Rocks, major festival headliners
+
+For each source, provide:
+- [Article Title](complete URL)
+- Venue/event name, role, date
+
+IMPORTANT: Include complete URLs.""",
+
+    "2_future": """Find {target_count} sources showing {artist_name} has UPCOMING (2025-2026) lead or starring roles.
+
+Search for:
+- Announced performances at major venues
+- Future engagements with prestigious organizations
+- Upcoming tours or productions
+- Festival lineups where artist is featured
+
+Look for announcements in:
+- Venue websites (Carnegie Hall, Royal Opera House, etc.)
+- Artist's official announcements
+- Major publication previews
+- Festival announcements
+
+For each source, provide:
+- [Announcement Title](complete URL)
+- Venue/event name, role, date
+
+IMPORTANT: Include complete URLs. Look for 2025-2026 dates specifically.""",
+
+    "4_past": """Find {target_count} sources showing {artist_name} had PAST lead, starring, or critical roles for distinguished organizations.
+
+Search for:
+- Past engagements with major orchestras, opera companies, festivals
+- Critical roles with prestigious organizations
+- Principal positions or residencies
+- Collaborations with distinguished ensembles
+
+DISTINGUISHED ORGANIZATIONS BY FIELD:
+- Orchestras: Berlin Philharmonic, Vienna Philharmonic, New York Philharmonic, London Symphony
+- Opera: Metropolitan Opera, Royal Opera House, La Scala, Bayreuth Festival
+- Festivals: Salzburg Festival, BBC Proms, Tanglewood, Aspen Music Festival
+- Ensembles: Chamber Music Society of Lincoln Center, etc.
+
+For each source, provide:
+- [Article Title](complete URL)
+- Organization name, role, date""",
+
+    "4_future": """Find {target_count} sources showing {artist_name} has FUTURE engagements with distinguished organizations.
+
+Search for:
+- Announced engagements with major organizations
+- Future performances with prestigious ensembles
+- Upcoming residencies or appointments
+- Festival announcements
+
+For each source, provide:
+- [Announcement Title](complete URL)
+- Organization name, role, date""",
+
+    "5": """Find {target_count} sources showing {artist_name} has achieved major commercial or critically acclaimed successes.
+
+Search for:
+- Sold-out performances
+- Chart success (Billboard, iTunes, classical charts)
+- Sales records or streaming milestones
+- Critical acclaim (awards, rave reviews)
+- Box office success
+
+SUCCESS INDICATORS:
+- "Sold out" performances
+- Billboard chart positions
+- Streaming numbers (Spotify, Apple Music)
+- Recording sales (Gold, Platinum certifications)
+- "Critically acclaimed" reviews
+- "Breakthrough" or "sensation" coverage
+
+For each source, provide:
+- [Article Title](complete URL)
+- Success metric described""",
+
+    "6": """Find {target_count} sources showing {artist_name} has received significant recognition from organizations, critics, or experts.
+
+Search for:
+- Critical praise from recognized experts
+- Recognition from industry organizations
+- Expert testimonials or endorsements
+- "Rising star" or "leading" designations
+- Inclusion in "best of" lists from prestigious sources
+
+RECOGNIZED EXPERTS/ORGANIZATIONS:
+- Music critics at major publications
+- Industry organizations (Recording Academy, etc.)
+- Distinguished musicians' testimonials
+- Academic/institutional recognition
+
+For each source, provide:
+- [Article Title](complete URL)
+- Type of recognition, source""",
+
+    "7": """Find sources about {artist_name}'s salary/remuneration, and industry wage data for comparison.
+
+CRITICAL: For O-1 visa, we need to prove artist earns substantially above median.
+
+Search for TWO TYPES OF EVIDENCE:
+
+1. ARTIST'S SALARY/FEES (if findable):
+   - Contract amounts
+   - Performance fees
+   - News articles mentioning compensation
+   - "Earned $X for performance" mentions
+
+2. INDUSTRY WAGE COMPARISONS (ESSENTIAL):
+   - Bureau of Labor Statistics data: search "onetcenter.org musicians wages"
+   - BLS occupational employment data: search "bls.gov occupational employment wages musicians"
+   - Union scales for comparison (AFM, SAG-AFTRA, etc.)
+   - Industry salary surveys from publications
+
+SPECIFIC SEARCHES TO TRY:
+- "onetcenter.org music director wages"
+- "onetcenter.org musician wages" 
+- "bls.gov occupational employment statistics musicians"
+- "{artist_name} performance fee"
+- "{artist_name} contract amount"
+- "union scale musicians comparison"
+
+For each source, provide:
+- [Source Title](complete URL)
+- Wage/salary information
+- Whether it's artist-specific or industry comparison data
+
+IMPORTANT: Finding BLS comparison data is critical. If no artist-specific salary found, industry data alone is acceptable.""",
+}
+
+
+# ============================================================
+# SYSTEM INSTRUCTIONS (sent with every search)
+# ============================================================
+
+SEARCH_SYSTEM_PROMPT = """You are a USCIS immigration attorney researching O-1 visa evidence. 
+Search the web and return sources that meet USCIS standards for extraordinary ability.
+
+CRITICAL: Your response must include:
+1. For each source: Full URL in markdown link format [Title](URL)
+2. Brief description of why it's relevant
+3. Key quote or excerpt if applicable
+
+Format your response like:
+1. [Article Title](https://full-url.com) - Why this is strong evidence
+2. [Another Article](https://another-url.com) - Key points from this source
+etc.
+
+USCIS STANDARDS:
+- Prefer sources from prestigious publications over local papers
+- Official announcements > press releases
+- Critical reviews > event listings
+- Verifiable evidence > unsubstantiated claims"""
+
+
+# ============================================================
+# CUSTOMIZATION GUIDE
+# ============================================================
+
+"""
+HOW TO CUSTOMIZE THESE PROMPTS:
+
+1. ADD SPECIFIC SOURCES:
+   Example: For classical violinists, add "The Strad" to criterion 3
+
+2. ADD SPECIFIC VENUES:
+   Example: For opera singers, add "Glyndebourne" to criterion 2_past
+
+3. ADD SPECIFIC AWARDS:
+   Example: For jazz musicians, add "NEA Jazz Masters" to criterion 1
+
+4. ADJUST SEARCH STRATEGIES:
+   Example: For criterion 7, add specific union contracts or fee schedules
+
+5. ADD FIELD-SPECIFIC LANGUAGE:
+   Example: For conductors, search for "music director" not just "performer"
+
+TESTING YOUR CHANGES:
+1. Edit the prompt for one criterion
+2. Test with a known artist in that field
+3. Compare results to manual ChatGPT search
+4. Iterate until results match manual quality
+
+EXAMPLE CUSTOMIZATION:
+
+Before:
+"3": "Find reviews from major publications..."
+
+After (for classical pianists):
+"3": "Find reviews from major publications.
+PRIORITIZE: Gramophone, BBC Music Magazine, International Piano, 
+New York Times, Guardian.
+SEARCH FOR: Recital reviews, concerto performances, 
+chamber music collaborations, recording reviews.
+KEYWORDS: 'virtuoso', 'interpretive', 'technical mastery', 'distinguished'"
+"""
