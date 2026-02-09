@@ -1,0 +1,240 @@
+"""
+Export Package - Tab 4
+Generates ZIP file with highlighted PDFs organized by criterion
+"""
+
+import streamlit as st
+import io
+import zipfile
+from datetime import datetime
+from src.prompts import CRITERIA
+
+
+def render_export_tab():
+    """
+    Export all highlighted PDFs in organized ZIP structure
+    """
+    
+    st.header("📦 Export Evidence Package")
+    st.markdown("""
+    Download all highlighted PDFs organized by criterion.
+    
+    **ZIP Structure:**
+    ```
+    evidence_package_YYYY-MM-DD/
+    ├── Criterion_1_Awards/
+    │   ├── source1_highlighted.pdf
+    │   └── source2_highlighted.pdf
+    ├── Criterion_3_Reviews/
+    │   ├── review1_highlighted.pdf
+    │   └── review2_highlighted.pdf
+    └── ...
+    ```
+    """)
+    
+    # Count what's available
+    total_highlighted = sum(
+        len(highlights)
+        for highlights in st.session_state.criterion_highlights.values()
+    )
+    
+    if total_highlighted == 0:
+        st.info("""
+        ✨ **No highlighted PDFs yet!**
+        
+        Go to **Highlight & Review** tab to highlight your evidence first.
+        """)
+        return
+    
+    st.success(f"📄 **{total_highlighted} highlighted PDF(s)** ready to export")
+    
+    # Show breakdown
+    st.divider()
+    st.subheader("📊 Export Preview")
+    
+    for cid, highlights in st.session_state.criterion_highlights.items():
+        if highlights:
+            desc = CRITERIA.get(cid, "")
+            folder_name = get_criterion_folder_name(cid)
+            
+            with st.expander(f"📁 {folder_name} - {len(highlights)} file(s)"):
+                for filename in highlights.keys():
+                    st.caption(f"📄 {filename}")
+    
+    st.divider()
+    
+    # Export options
+    st.subheader("⚙️ Export Options")
+    
+    col1, col2 = st.columns(2)
+    
+    with col1:
+        include_originals = st.checkbox(
+            "Include original (un-highlighted) PDFs",
+            value=False,
+            help="Add a subfolder with original PDFs for reference"
+        )
+    
+    with col2:
+        package_name = st.text_input(
+            "Package name",
+            value=f"evidence_package_{datetime.now().strftime('%Y-%m-%d')}",
+            help="Name of the ZIP file"
+        )
+    
+    # Generate package
+    st.divider()
+    
+    if st.button("📦 Generate Export Package", type="primary", use_container_width=True):
+        with st.spinner("Generating package..."):
+            try:
+                zip_bytes = generate_export_package(
+                    package_name=package_name,
+                    include_originals=include_originals
+                )
+                
+                st.success("✅ Package ready!")
+                
+                # Download button
+                st.download_button(
+                    label="⬇️ Download ZIP Package",
+                    data=zip_bytes,
+                    file_name=f"{package_name}.zip",
+                    mime="application/zip",
+                    use_container_width=True
+                )
+                
+            except Exception as e:
+                st.error(f"Error generating package: {str(e)}")
+                import traceback
+                with st.expander("Error details"):
+                    st.code(traceback.format_exc())
+
+
+def get_criterion_folder_name(cid: str) -> str:
+    """
+    Generate clean folder name for criterion
+    """
+    desc = CRITERIA.get(cid, "Unknown")
+    
+    # Create short descriptor
+    descriptors = {
+        "1": "Awards",
+        "2_past": "Past_Lead_Roles",
+        "2_future": "Future_Lead_Roles",
+        "3": "Reviews",
+        "4_past": "Past_Org_Roles",
+        "4_future": "Future_Org_Roles",
+        "5": "Commercial_Success",
+        "6": "Recognition",
+        "7": "Salary_Data"
+    }
+    
+    descriptor = descriptors.get(cid, cid.replace("_", "-"))
+    return f"Criterion_{cid.replace('_', '-')}_{descriptor}"
+
+
+def generate_export_package(package_name: str, include_originals: bool = False) -> bytes:
+    """
+    Generate ZIP file with all highlighted PDFs organized by criterion
+    """
+    
+    zip_buffer = io.BytesIO()
+    
+    with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
+        
+        # Add highlighted PDFs by criterion
+        for cid, highlights in st.session_state.criterion_highlights.items():
+            folder_name = get_criterion_folder_name(cid)
+            
+            for filename, data in highlights.items():
+                # Get highlighted PDF
+                highlighted_pdf = create_highlighted_pdf(
+                    pdf_bytes=data['pdf_bytes'],
+                    quotes=data['quotes'],
+                    filename=filename
+                )
+                
+                # Add to ZIP
+                zip_path = f"{package_name}/{folder_name}/{filename}"
+                zip_file.writestr(zip_path, highlighted_pdf)
+        
+        # Optionally add originals
+        if include_originals:
+            for cid, pdfs in st.session_state.criterion_pdfs.items():
+                folder_name = get_criterion_folder_name(cid)
+                
+                for filename, pdf_bytes in pdfs.items():
+                    zip_path = f"{package_name}/Originals/{folder_name}/{filename}"
+                    zip_file.writestr(zip_path, pdf_bytes)
+        
+        # Add README
+        readme_content = generate_readme()
+        zip_file.writestr(f"{package_name}/README.txt", readme_content)
+    
+    zip_buffer.seek(0)
+    return zip_buffer.read()
+
+
+def create_highlighted_pdf(pdf_bytes: bytes, quotes: dict, filename: str) -> bytes:
+    """
+    Create highlighted PDF from original + quotes
+    
+    For now, returns original PDF.
+    TODO: Implement actual highlighting using PyMuPDF or reportlab
+    """
+    
+    # PLACEHOLDER: This should add yellow highlights to the PDF
+    # For MVP, just return original PDF
+    # See pdf_highlighter.py in original code for full implementation
+    
+    return pdf_bytes
+
+
+def generate_readme() -> str:
+    """
+    Generate README file for the package
+    """
+    
+    beneficiary = st.session_state.beneficiary_name
+    date = datetime.now().strftime("%Y-%m-%d %H:%M")
+    
+    selected = st.session_state.selected_criteria
+    
+    readme = f"""O-1 VISA EVIDENCE PACKAGE
+Generated: {date}
+Beneficiary: {beneficiary}
+
+PACKAGE CONTENTS:
+================
+
+This package contains evidence organized by USCIS O-1 criterion.
+
+CRITERIA INCLUDED:
+"""
+    
+    for cid in selected:
+        if cid in st.session_state.criterion_highlights:
+            desc = CRITERIA.get(cid, "")
+            count = len(st.session_state.criterion_highlights[cid])
+            folder = get_criterion_folder_name(cid)
+            readme += f"\n({cid}) {desc}\n"
+            readme += f"    Folder: {folder}/\n"
+            readme += f"    Files: {count}\n"
+    
+    readme += f"""
+
+TOTAL EVIDENCE FILES: {sum(len(h) for h in st.session_state.criterion_highlights.values())}
+
+USAGE NOTES:
+============
+
+1. Each criterion has its own folder
+2. PDFs are highlighted with relevant quotes
+3. Review each file before submission
+4. Add supporting documentation as needed
+
+Generated by O-1 Visa Evidence Assistant
+"""
+    
+    return readme

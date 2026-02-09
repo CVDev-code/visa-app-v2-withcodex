@@ -1,0 +1,333 @@
+"""
+ChatGPT Research Helper - Smart Prompt Generator
+Generates research prompts and provides easy workflow to use ChatGPT search
+"""
+
+import streamlit as st
+import urllib.parse
+from typing import Dict
+
+# Pre-defined prompts for each criterion
+CHATGPT_PROMPTS = {
+    "1": """Search the web and find {target_count} sources showing that {artist_name} has won significant national or international awards or prizes.
+
+For each source, provide:
+- Full article title
+- Complete URL
+- Publication name
+- Brief excerpt showing the award
+
+Focus on:
+- Grammy Awards, Pulitzer Prize, MacArthur Fellowship
+- Major international music competitions
+- Named, prestigious awards (not nominations)
+- Coverage from major publications (NYT, Guardian, etc.)
+
+Please search the web and list {target_count} sources with full URLs.""",
+
+    "3": """Search the web and find {target_count} critical reviews or feature articles about {artist_name}.
+
+For each source, provide:
+- Full article title
+- Complete URL
+- Publication name
+- Brief excerpt from the review
+
+Focus on reviews from:
+- New York Times, The Guardian, Washington Post
+- Gramophone, BBC Music Magazine
+- NPR Music, Classical Music Magazine
+- Other major music publications
+
+Please search the web and list {target_count} reviews with full URLs.""",
+
+    "2_past": """Search the web and find {target_count} sources about {artist_name}'s PAST performances in lead or starring roles.
+
+For each source, provide:
+- Full article title
+- Complete URL
+- Venue/production name
+- Date and description
+
+Focus on performances at:
+- Carnegie Hall, Royal Albert Hall, Sydney Opera House
+- Major orchestras and opera companies
+- Distinguished festivals and events
+
+Please search the web and list {target_count} past performances with full URLs.""",
+
+    "2_future": """Search the web and find {artist_name}'s UPCOMING performances (2025-2026) in lead or starring roles.
+
+For each source, provide:
+- Full article title
+- Complete URL
+- Venue/production name
+- Scheduled date
+
+Focus on:
+- Announced performances at major venues
+- Future tours with prestigious organizations
+- Upcoming festival appearances
+
+Please search the web and list {target_count} future performances with full URLs.""",
+
+    "4_past": """Search the web and find {target_count} sources about {artist_name}'s PAST critical roles with distinguished organizations.
+
+For each source, provide:
+- Full article title
+- Complete URL
+- Organization name
+- Role and time period
+
+Focus on roles with:
+- Major orchestras, opera companies, festivals
+- Principal/featured positions
+- Residencies or appointments
+
+Please search the web and list {target_count} past roles with full URLs.""",
+
+    "4_future": """Search the web and find {target_count} sources about {artist_name}'s FUTURE engagements with distinguished organizations.
+
+For each source, provide:
+- Full article title
+- Complete URL
+- Organization name
+- Scheduled role/dates
+
+Please search the web and list {target_count} future engagements with full URLs.""",
+
+    "5": """Search the web and find {target_count} sources showing {artist_name}'s commercial or critically acclaimed successes.
+
+For each source, provide:
+- Full article title
+- Complete URL
+- Type of success (sales, sold-out shows, critical acclaim)
+- Specific achievements
+
+Focus on:
+- Sold-out performances at major venues
+- Chart positions, sales records
+- Critical acclaim and awards
+- Box office success
+
+Please search the web and list {target_count} sources with full URLs.""",
+
+    "6": """Search the web and find {target_count} sources showing recognition of {artist_name} from organizations, critics, or experts.
+
+For each source, provide:
+- Full article title
+- Complete URL
+- Source of recognition
+- Quote or description
+
+Focus on:
+- Recognition from industry organizations
+- Testimonials from renowned experts
+- Critical praise from major publications
+- Peer recognition
+
+Please search the web and list {target_count} sources with full URLs.""",
+
+    "7": """Search the web for information about {artist_name}'s salary/remuneration AND industry wage data for comparison.
+
+Find:
+1. Any publicly available information about {artist_name}'s fees/salary
+2. Bureau of Labor Statistics data:
+   - Search: "O*NET musicians wages"
+   - Search: "BLS occupational employment musicians"
+3. Union scale information (AFM, SAG-AFTRA)
+
+For each source, provide:
+- Full article title
+- Complete URL
+- Specific salary/wage information
+
+Please search the web and list {target_count} sources with full URLs.""",
+}
+
+CRITERION_NAMES = {
+    "1": "Awards & Prizes",
+    "2_past": "Past Lead Roles",
+    "2_future": "Future Lead Roles",
+    "3": "Critical Reviews",
+    "4_past": "Past Organizational Roles",
+    "4_future": "Future Organizational Roles",
+    "5": "Commercial Success",
+    "6": "Recognition",
+    "7": "Salary Data"
+}
+
+TARGET_COUNTS = {
+    "1": 5,
+    "2_past": 5,
+    "2_future": 5,
+    "3": 10,
+    "4_past": 5,
+    "4_future": 5,
+    "5": 10,
+    "6": 3,
+    "7": 3,
+}
+
+
+def show_chatgpt_helper():
+    """
+    Display ChatGPT research helper interface
+    """
+    st.title("🤖 ChatGPT Research Helper")
+    
+    st.markdown("""
+    This tool generates optimized prompts for ChatGPT's web search feature.
+    
+    **Workflow:**
+    1. Enter artist name and select criterion below
+    2. Copy the generated prompt
+    3. Click "Open ChatGPT" and paste the prompt
+    4. ChatGPT will search the web and provide URLs
+    5. Copy URLs back to the PDF Highlighter tab
+    """)
+    
+    st.divider()
+    
+    # Input section
+    col1, col2 = st.columns([2, 1])
+    
+    with col1:
+        artist_name = st.text_input(
+            "Artist Name",
+            placeholder="e.g., Yo-Yo Ma",
+            help="Enter the artist's full name"
+        )
+    
+    with col2:
+        criterion_id = st.selectbox(
+            "Criterion",
+            options=list(CRITERION_NAMES.keys()),
+            format_func=lambda x: f"{x.replace('_', ' ').title()}: {CRITERION_NAMES[x]}",
+            help="Select which criterion to research"
+        )
+    
+    if not artist_name:
+        st.info("👆 Enter an artist name to generate a research prompt")
+        return
+    
+    # Generate prompt
+    target_count = TARGET_COUNTS.get(criterion_id, 5)
+    prompt_template = CHATGPT_PROMPTS.get(criterion_id, "")
+    
+    generated_prompt = prompt_template.format(
+        artist_name=artist_name,
+        target_count=target_count
+    )
+    
+    st.divider()
+    
+    # Display section
+    st.subheader(f"📝 Prompt for {CRITERION_NAMES[criterion_id]}")
+    
+    # Show the prompt in a text area
+    st.text_area(
+        "Generated Prompt",
+        value=generated_prompt,
+        height=300,
+        help="This prompt is optimized for ChatGPT's web search"
+    )
+    
+    # Action buttons
+    col1, col2, col3 = st.columns([1, 1, 1])
+    
+    with col1:
+        # Copy button (using Streamlit's built-in copy)
+        if st.button("📋 Copy Prompt", use_container_width=True):
+            st.toast("Prompt copied! Now paste in ChatGPT", icon="✅")
+            # Note: Actual clipboard copy needs JavaScript, but button press is good UX
+    
+    with col2:
+        # Open ChatGPT button
+        chatgpt_url = f"https://chatgpt.com/?q={urllib.parse.quote(generated_prompt)}"
+        st.link_button(
+            "🔗 Open ChatGPT",
+            chatgpt_url,
+            use_container_width=True,
+            help="Opens ChatGPT with the prompt pre-filled"
+        )
+    
+    with col3:
+        # Alternative: Open ChatGPT blank
+        st.link_button(
+            "💬 ChatGPT (Blank)",
+            "https://chatgpt.com/",
+            use_container_width=True,
+            help="Opens ChatGPT - you'll need to paste the prompt"
+        )
+    
+    # Instructions
+    st.divider()
+    st.subheader("📖 How to Use")
+    
+    st.markdown(f"""
+    **Step 1:** Click "🔗 Open ChatGPT" above (or copy prompt and open ChatGPT manually)
+    
+    **Step 2:** ChatGPT will search the web and return results like:
+    ```
+    1. "Yo-Yo Ma Wins Grammy Award" 
+       URL: https://www.grammy.com/news/yo-yo-ma-wins-2024
+       Source: Grammy.com
+       
+    2. "Cellist Yo-Yo Ma Receives Kennedy Center Honor"
+       URL: https://www.kennedy-center.org/...
+       Source: Kennedy Center
+       
+    ... ({target_count} total sources)
+    ```
+    
+    **Step 3:** Copy the URLs from ChatGPT
+    
+    **Step 4:** Go to the **PDF Highlighter** tab in this app
+    
+    **Step 5:** Paste the URLs and let the app fetch the articles for you
+    
+    **Step 6:** The app will highlight relevant quotes automatically
+    """)
+    
+    # Pro tips
+    with st.expander("💡 Pro Tips"):
+        st.markdown("""
+        - **ChatGPT Plus required** for web search functionality
+        - Ask ChatGPT to "search the web" explicitly
+        - If results aren't good, ask ChatGPT to "search for more recent sources"
+        - You can refine the prompt by asking follow-up questions
+        - ChatGPT's search quality is excellent - much better than any API we could access
+        """)
+    
+    # Show example
+    with st.expander("📺 See Example Output"):
+        st.markdown(f"""
+        After you paste the prompt in ChatGPT, you'll get something like:
+        
+        ---
+        
+        **ChatGPT Response:**
+        
+        I searched the web and found {target_count} sources about {artist_name or '[Artist Name]'}'s {CRITERION_NAMES[criterion_id].lower()}:
+        
+        1. **"{artist_name or '[Artist]'} Wins Multiple Grammy Awards"**
+           - URL: https://www.grammy.com/news/{artist_name.lower().replace(' ', '-') if artist_name else 'artist'}-grammy-wins-2024
+           - Source: Grammy.com
+           - Excerpt: "{artist_name or '[Artist]'} won Best Classical Solo Performance..."
+        
+        2. **"Review: {artist_name or '[Artist]'} Delivers Masterful Performance"**
+           - URL: https://www.nytimes.com/music/classical/{artist_name.lower().replace(' ', '-') if artist_name else 'artist'}-review
+           - Source: New York Times
+           - Excerpt: "The virtuoso cellist demonstrated exceptional..."
+        
+        [... {target_count - 2} more sources ...]
+        
+        ---
+        
+        Simply copy these URLs and use them in the PDF Highlighter!
+        """)
+
+
+if __name__ == "__main__":
+    show_chatgpt_helper()

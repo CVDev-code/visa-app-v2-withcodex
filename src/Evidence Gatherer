@@ -1,0 +1,292 @@
+"""
+Evidence Gatherer - Tab 1
+Handles 3 input methods for each criterion: Upload, URL, AI Agent
+"""
+
+import streamlit as st
+from src.prompts import CRITERIA
+
+
+def render_evidence_gatherer():
+    """
+    Main evidence gathering interface.
+    Shows each selected criterion with 3 input methods.
+    """
+    
+    st.header("📂 Gather Evidence by Criterion")
+    st.markdown("""
+    For each criterion, you can:
+    - 📤 **Upload** PDF files directly
+    - 🔗 **Paste URLs** to convert to PDFs
+    - 🤖 **Use AI Agent** to find sources automatically
+    
+    All sources will be available in the **Highlight & Review** tab.
+    """)
+    
+    beneficiary_name = st.session_state.beneficiary_name
+    selected_criteria = st.session_state.selected_criteria
+    
+    if not selected_criteria:
+        st.info("👈 Select criteria in the sidebar to begin")
+        return
+    
+    st.divider()
+    
+    # Show each criterion with 3 input methods
+    for cid in selected_criteria:
+        desc = CRITERIA.get(cid, "")
+        
+        with st.expander(f"📋 Criterion ({cid}): {desc}", expanded=True):
+            render_criterion_inputs(cid, desc, beneficiary_name)
+    
+    # Summary
+    st.divider()
+    render_evidence_summary()
+
+
+def render_criterion_inputs(cid: str, desc: str, beneficiary_name: str):
+    """
+    Render the 3 input methods for a single criterion
+    """
+    
+    st.markdown(f"**Evidence sources for Criterion {cid}**")
+    
+    # Create 3 columns for the 3 input methods
+    col1, col2, col3 = st.columns(3)
+    
+    # ============================================================
+    # METHOD 1: UPLOAD FILES
+    # ============================================================
+    with col1:
+        st.markdown("#### 📤 Upload PDFs")
+        
+        uploaded_files = st.file_uploader(
+            "Choose PDF file(s)",
+            type=["pdf"],
+            accept_multiple_files=True,
+            key=f"upload_{cid}",
+            label_visibility="collapsed"
+        )
+        
+        if uploaded_files:
+            # Store in session state
+            if cid not in st.session_state.criterion_uploads:
+                st.session_state.criterion_uploads[cid] = []
+            
+            # Add new uploads (avoid duplicates)
+            existing_names = {name for name, _ in st.session_state.criterion_uploads[cid]}
+            for file in uploaded_files:
+                if file.name not in existing_names:
+                    st.session_state.criterion_uploads[cid].append(
+                        (file.name, file.read())
+                    )
+            
+            st.success(f"✅ {len(uploaded_files)} file(s) uploaded")
+        
+        # Show current uploads
+        current_uploads = st.session_state.criterion_uploads.get(cid, [])
+        if current_uploads:
+            st.caption(f"**{len(current_uploads)} uploaded:**")
+            for name, _ in current_uploads:
+                st.caption(f"📄 {name}")
+            
+            if st.button("🗑️ Clear uploads", key=f"clear_upload_{cid}"):
+                st.session_state.criterion_uploads[cid] = []
+                st.rerun()
+    
+    # ============================================================
+    # METHOD 2: PASTE URLS
+    # ============================================================
+    with col2:
+        st.markdown("#### 🔗 Paste URLs")
+        
+        urls_text = st.text_area(
+            "Enter URLs (one per line)",
+            placeholder="https://example.com/article1\nhttps://example.com/article2",
+            height=150,
+            key=f"url_input_{cid}",
+            label_visibility="collapsed"
+        )
+        
+        if st.button("Add URLs", key=f"add_urls_{cid}", use_container_width=True):
+            urls = [url.strip() for url in urls_text.split("\n") if url.strip()]
+            
+            if urls:
+                if cid not in st.session_state.criterion_urls:
+                    st.session_state.criterion_urls[cid] = []
+                
+                # Add new URLs (avoid duplicates)
+                existing_urls = set(st.session_state.criterion_urls[cid])
+                new_urls = [url for url in urls if url not in existing_urls]
+                
+                st.session_state.criterion_urls[cid].extend(new_urls)
+                st.success(f"✅ Added {len(new_urls)} URL(s)")
+                st.rerun()
+        
+        # Show current URLs
+        current_urls = st.session_state.criterion_urls.get(cid, [])
+        if current_urls:
+            st.caption(f"**{len(current_urls)} URL(s):**")
+            for url in current_urls[:3]:  # Show first 3
+                st.caption(f"🔗 {url[:50]}...")
+            if len(current_urls) > 3:
+                st.caption(f"... and {len(current_urls) - 3} more")
+            
+            if st.button("🗑️ Clear URLs", key=f"clear_urls_{cid}"):
+                st.session_state.criterion_urls[cid] = []
+                st.rerun()
+    
+    # ============================================================
+    # METHOD 3: AI AGENT
+    # ============================================================
+    with col3:
+        st.markdown("#### 🤖 AI Agent")
+        
+        st.caption("Let AI find sources automatically")
+        
+        if st.button("🔍 Search with AI", key=f"ai_search_{cid}", use_container_width=True):
+            with st.spinner("🤖 AI searching..."):
+                try:
+                    from src.ai_research import ai_search_for_evidence
+                    
+                    results = ai_search_for_evidence(
+                        artist_name=beneficiary_name,
+                        name_variants=st.session_state.beneficiary_variants,
+                        selected_criteria=[cid],
+                        criteria_descriptions={cid: desc},
+                        feedback=None,
+                        artist_field=st.session_state.artist_field
+                    )
+                    
+                    if cid in results:
+                        st.session_state.criterion_agent_results[cid] = results[cid]
+                        st.success(f"✅ Found {len(results[cid])} sources!")
+                        st.rerun()
+                    else:
+                        st.warning("No results found")
+                
+                except Exception as e:
+                    st.error(f"Error: {str(e)}")
+                    st.caption("💡 Try ChatGPT Helper tab instead")
+        
+        # Show AI results
+        agent_results = st.session_state.criterion_agent_results.get(cid, [])
+        if agent_results:
+            st.caption(f"**{len(agent_results)} AI sources:**")
+            for item in agent_results[:3]:
+                st.caption(f"🔗 {item.get('title', 'Untitled')[:40]}...")
+            if len(agent_results) > 3:
+                st.caption(f"... and {len(agent_results) - 3} more")
+            
+            col_a, col_b = st.columns(2)
+            with col_a:
+                if st.button("✅ Approve", key=f"approve_agent_{cid}", use_container_width=True):
+                    # Move to URLs for processing
+                    if cid not in st.session_state.criterion_urls:
+                        st.session_state.criterion_urls[cid] = []
+                    
+                    new_urls = [item['url'] for item in agent_results]
+                    existing = set(st.session_state.criterion_urls[cid])
+                    st.session_state.criterion_urls[cid].extend([u for u in new_urls if u not in existing])
+                    
+                    st.session_state.criterion_agent_results[cid] = []
+                    st.success("✅ Moved to URLs")
+                    st.rerun()
+            
+            with col_b:
+                if st.button("🗑️ Clear", key=f"clear_agent_{cid}", use_container_width=True):
+                    st.session_state.criterion_agent_results[cid] = []
+                    st.rerun()
+
+
+def render_evidence_summary():
+    """Show summary of all gathered evidence"""
+    
+    st.subheader("📊 Evidence Summary")
+    
+    total_uploads = sum(len(files) for files in st.session_state.criterion_uploads.values())
+    total_urls = sum(len(urls) for urls in st.session_state.criterion_urls.values())
+    total_agent = sum(len(results) for results in st.session_state.criterion_agent_results.values())
+    
+    col1, col2, col3, col4 = st.columns(4)
+    
+    with col1:
+        st.metric("Uploaded PDFs", total_uploads)
+    with col2:
+        st.metric("URLs to Convert", total_urls)
+    with col3:
+        st.metric("AI Results Pending", total_agent)
+    with col4:
+        total = total_uploads + total_urls + total_agent
+        st.metric("Total Sources", total)
+    
+    if total_urls > 0:
+        st.divider()
+        st.markdown("### 🔄 Convert URLs to PDFs")
+        st.info(f"You have {total_urls} URL(s) ready to convert to PDFs")
+        
+        if st.button("🔄 Convert All URLs to PDFs", type="primary", use_container_width=True):
+            with st.spinner(f"Converting {total_urls} URLs..."):
+                convert_all_urls_to_pdfs()
+
+
+def convert_all_urls_to_pdfs():
+    """Convert all pending URLs to PDFs and add to criterion_pdfs"""
+    
+    from src.web_to_pdf import batch_convert_urls_to_pdfs
+    
+    # Prepare URLs by criterion
+    urls_by_criterion = {}
+    for cid, urls in st.session_state.criterion_urls.items():
+        if urls:
+            urls_by_criterion[cid] = [
+                {"url": url, "title": f"source_{i+1}"}
+                for i, url in enumerate(urls)
+            ]
+    
+    if not urls_by_criterion:
+        st.warning("No URLs to convert")
+        return
+    
+    # Convert
+    progress_bar = st.progress(0)
+    status_text = st.empty()
+    
+    def progress_callback(processed, total, message):
+        if total > 0:
+            progress_bar.progress(min(processed / total, 1.0))
+        status_text.text(message)
+    
+    try:
+        pdfs_by_criterion = batch_convert_urls_to_pdfs(
+            urls_by_criterion,
+            progress_callback=progress_callback
+        )
+        
+        # Add to criterion_pdfs
+        for cid, pdf_dict in pdfs_by_criterion.items():
+            if cid not in st.session_state.criterion_pdfs:
+                st.session_state.criterion_pdfs[cid] = {}
+            
+            st.session_state.criterion_pdfs[cid].update(pdf_dict)
+        
+        # Clear URLs that were successfully converted
+        for cid in pdfs_by_criterion.keys():
+            st.session_state.criterion_urls[cid] = []
+        
+        total_converted = sum(len(pdfs) for pdfs in pdfs_by_criterion.values())
+        
+        progress_bar.progress(1.0)
+        status_text.empty()
+        
+        st.success(f"""
+        ✅ Converted {total_converted} URLs to PDFs!
+        
+        Go to **Highlight & Review** tab to continue.
+        """)
+        
+    except Exception as e:
+        st.error(f"Conversion error: {str(e)}")
+        import traceback
+        with st.expander("Error details"):
+            st.code(traceback.format_exc())
