@@ -1,4 +1,31 @@
 streamlit>=1.33
 pymupdf>=1.23
-openai>=1.40.0
 python-dotenv>=1.0.1
+
+# OpenAI for quote extraction (PDF Highlighter tab)
+openai>=1.40.0
+
+# Google Cloud Vertex AI for web search (Research tab)
+google-cloud-aiplatform>=1.38.0
+
+# Web scraping and PDF conversion
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+lxml>=5.0.0
+lxml_html_clean>=0.3.1
+reportlab>=4.0.0
+newspaper3k>=0.2.8
+pytesseract>=0.3.10
+pillow>=10.0.0
+playwright>=1.45.0
+pypdf>=4.0.0
+
+# WeasyPrint for PDF generation
+weasyprint>=60.0
+
+# HTML parsing
+html5lib>=1.1
+
+# Translation support
+deep-translator>=1.11.4
+langdetect>=1.0.9
