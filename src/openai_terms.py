@@ -42,7 +42,7 @@ def suggest_ovisa_quotes(
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set")
 
-    model = _get_secret("OPENAI_MODEL") or "gpt-4.1-mini"
+    model = _get_secret("OPENAI_MODEL") or "gpt-4o-mini"
     client = OpenAI(api_key=api_key)
 
     # Build criteria block shown to the model (only selected)
@@ -68,31 +68,19 @@ def suggest_ovisa_quotes(
         text=document_text,
     )
 
-    # New SDKs accept response_format; older ones raise TypeError.
+    # Call OpenAI API
     try:
-        resp = client.responses.create(
+        resp = client.chat.completions.create(
             model=model,
-            input=[
+            messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
                 {"role": "user", "content": prompt},
             ],
             response_format={"type": "json_object"},
         )
-        raw = resp.output_text
-    except TypeError:
-        resp = client.responses.create(
-            model=model,
-            input=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-        )
-        raw = getattr(resp, "output_text", None)
-        if not raw:
-            try:
-                raw = resp.output[0].content[0].text
-            except Exception:
-                raw = str(resp)
+        raw = resp.choices[0].message.content
+    except Exception as e:
+        raise RuntimeError(f"OpenAI API error: {str(e)}")
 
     try:
         data = json.loads(raw)
