@@ -228,7 +228,7 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
         st.markdown("### ✅ Review & Approve Sources")
         
         # Bulk actions
-        col1, col2, col3 = st.columns([1, 1, 2])
+        col1, col2 = st.columns([1, 1])
         with col1:
             if st.button("✅ Approve All", key=f"approve_all_{cid}"):
                 for i, item in enumerate(results):
@@ -237,13 +237,6 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                 st.rerun()
         
         with col2:
-            if st.button("❌ Reject All", key=f"reject_all_{cid}"):
-                for i, item in enumerate(results):
-                    st.session_state.research_approvals[cid][item['url']] = False
-                    st.session_state[f"approve_{cid}_{i}"] = False
-                st.rerun()
-        
-        with col3:
             if st.button("🗑️ Clear All Results", key=f"clear_{cid}"):
                 st.session_state.research_results[cid] = []
                 st.session_state.research_approvals[cid] = {}
@@ -348,12 +341,28 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                     )
                     
                     if new_results:
-                        # Keep approved, add new
+                        # Keep approved, add new (up to configured max)
                         kept = [r for r in results if st.session_state.research_approvals[cid].get(r['url'], False)]
                         kept_urls = {r['url'] for r in kept}
                         new_items = [r for r in new_results if r['url'] not in kept_urls]
+
+                        # Do not exceed the maximum number of results
+                        max_results = config["max"]
+                        capacity = max(max_results - len(kept), 0)
+                        if capacity > 0:
+                            new_items = new_items[:capacity]
+                        else:
+                            new_items = []
                         
                         st.session_state.research_results[cid] = kept + new_items
+
+                        # Prune approvals to only URLs still in the list
+                        allowed_urls = {item['url'] for item in st.session_state.research_results[cid]}
+                        st.session_state.research_approvals[cid] = {
+                            url: ok
+                            for url, ok in st.session_state.research_approvals[cid].items()
+                            if url in allowed_urls
+                        }
                         
                         # Auto-approve new
                         for item in new_items:
