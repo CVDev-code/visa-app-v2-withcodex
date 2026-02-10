@@ -6,7 +6,10 @@ Uses web_search tool for evidence research
 
 import json
 import os
-from typing import List, Dict, Optional
+import re
+from datetime import datetime
+from urllib.parse import urlparse
+from typing import List, Dict, Optional, Tuple
 from openai import OpenAI
 
 
@@ -19,6 +22,341 @@ def _get_secret(name: str):
     except Exception:
         pass
     return os.getenv(name)
+
+
+SEARCH_CONFIGS: Dict[str, Dict[str, int]] = {
+    "1": {"pool": 50, "min": 1, "max": 5},
+    "2_past": {"pool": 100, "min": 10, "max": 10},
+    "2_future": {"pool": 100, "min": 10, "max": 10},
+    "3": {"pool": 100, "min": 10, "max": 15},
+    "4_past": {"pool": 100, "min": 10, "max": 10},
+    "4_future": {"pool": 100, "min": 10, "max": 10},
+    "5": {"pool": 50, "min": 3, "max": 10},
+    "6": {"pool": 50, "min": 3, "max": 10},
+    "7": {"pool": 20, "min": 3, "max": 5}
+}
+
+DEFAULT_SEARCH_CONFIG = {"pool": 50, "min": 8, "max": 10}
+
+TIER_1_DOMAINS = {
+    "grammy.com",
+    "kennedy-center.org",
+    "pulitzer.org",
+    "carnegiehall.org",
+    "metopera.org",
+    "berliner-philharmoniker.de",
+    "nytimes.com",
+    "theguardian.com",
+    "telegraph.co.uk",
+    "gramophone.co.uk",
+    "opera-news.com"
+}
+
+TIER_2_DOMAINS = {
+    "latimes.com",
+    "chicagotribune.com",
+    "variety.com",
+    "billboard.com",
+    "classical-music.com",
+    "salzburgfestival.at",
+    "glyndebourne.com"
+}
+
+DIRECTORY_DOMAINS = {
+    "operabase.com",
+    "bachtrack.com"
+}
+
+SALARY_DOMAINS = {
+    "bls.gov",
+    "onetonline.org",
+    "data.bls.gov"
+}
+
+
+def get_search_config(criterion_id: str) -> Dict[str, int]:
+    config = SEARCH_CONFIGS.get(criterion_id, DEFAULT_SEARCH_CONFIG)
+    return {
+        "pool": config["pool"],
+        "min": config["min"],
+        "max": config["max"]
+    }
+
+
+def _normalize_domain(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url)
+    domain = parsed.netloc or parsed.path.split("/")[0]
+    domain = domain.lower()
+    if domain.startswith("www."):
+        domain = domain[4:]
+    return domain
+
+
+def _extract_year(text: str) -> Optional[str]:
+    if not text:
+        return None
+    match = re.search(r"\b(19|20)\d{2}\b", text)
+    return match.group(0) if match else None
+
+
+def _is_review(item: Dict) -> bool:
+    text = f"{item.get('title', '')} {item.get('excerpt', '')}".lower()
+    return "review" in text or "critically acclaimed" in text
+
+
+def _is_announcement(item: Dict) -> bool:
+    text = f"{item.get('title', '')} {item.get('excerpt', '')}".lower()
+    return any(keyword in text for keyword in ["announcement", "season", "calendar", "press release", "program", "programme"])
+
+
+def _is_sales_signal(item: Dict) -> bool:
+    text = f"{item.get('title', '')} {item.get('excerpt', '')}".lower()
+    return any(keyword in text for keyword in ["sold out", "box office", "chart", "stream", "ticket sales", "capacity"])
+
+
+def _is_award_signal(item: Dict) -> bool:
+    text = f"{item.get('title', '')} {item.get('excerpt', '')}".lower()
+    return any(keyword in text for keyword in ["award", "prize", "honor", "honour", "fellowship", "medal"])
+
+
+def _get_usage_from_response(response) -> Tuple[int, int, int]:
+    usage = getattr(response, "usage", None)
+    if not usage:
+        return 0, 0, 0
+    input_tokens = getattr(usage, "input_tokens", 0) or 0
+    output_tokens = getattr(usage, "output_tokens", 0) or 0
+    total_tokens = getattr(usage, "total_tokens", input_tokens + output_tokens) or 0
+    return input_tokens, output_tokens, total_tokens
+
+
+def _log_token_usage(criterion_id: str, response, retrieval_pool_size: int, max_results: int, min_results: int, strict_mode: bool) -> None:
+    input_tokens, output_tokens, total_tokens = _get_usage_from_response(response)
+    if total_tokens == 0:
+        return
+    log_entry = {
+        "timestamp": datetime.utcnow().isoformat() + "Z",
+        "criterion_id": criterion_id,
+        "retrieval_pool_size": retrieval_pool_size,
+        "min_results": min_results,
+        "max_results": max_results,
+        "strict_mode": strict_mode,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens
+    }
+    try:
+        import streamlit as st
+        if "token_usage_log" not in st.session_state:
+            st.session_state.token_usage_log = []
+        st.session_state.token_usage_log.append(log_entry)
+    except Exception:
+        pass
+
+
+def _parse_search_results(content_text: str) -> List[Dict]:
+    if not content_text:
+        raise RuntimeError("API returned empty response")
+    content_text = content_text.strip()
+
+    start = content_text.find('[')
+    end = content_text.rfind(']') + 1
+
+    if start == -1 or end == 0:
+        try:
+            results = json.loads(content_text)
+            if not isinstance(results, list):
+                raise ValueError("Response is not a JSON array")
+        except json.JSONDecodeError:
+            raise ValueError(
+                f"No JSON array found in response. "
+                f"Response was: {content_text[:200]}..."
+            )
+    else:
+        json_str = content_text[start:end]
+        results = json.loads(json_str)
+        if not isinstance(results, list):
+            raise ValueError("Response is not a JSON array")
+
+    normalized_results = []
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        if 'url' not in item or not item['url']:
+            continue
+        normalized_results.append({
+            'url': item.get('url', ''),
+            'title': item.get('title', 'Untitled'),
+            'source': item.get('source', 'Unknown'),
+            'excerpt': item.get('excerpt', ''),
+            'relevance': item.get('relevance', '')
+        })
+
+    return normalized_results
+
+
+def _get_existing_results(criterion_id: str) -> Tuple[set, set]:
+    try:
+        import streamlit as st
+        existing = st.session_state.research_results.get(criterion_id, [])
+        urls = {item.get("url", "") for item in existing if item.get("url")}
+        domains = {_normalize_domain(url) for url in urls if url}
+        return urls, domains
+    except Exception:
+        return set(), set()
+
+
+def _rank_and_select_results(
+    criterion_id: str,
+    results: List[Dict],
+    min_results: int,
+    max_results: int
+) -> List[Dict]:
+    if not results:
+        return []
+
+    existing_c3_urls, existing_c3_domains = _get_existing_results("3")
+    review_overlap_present = bool(existing_c3_urls or existing_c3_domains)
+
+    candidates = []
+    seen_urls = set()
+    for item in results:
+        url = item.get("url", "")
+        if not url or url in seen_urls:
+            continue
+        seen_urls.add(url)
+        domain = _normalize_domain(url)
+        source_norm = (item.get("source") or "").strip().lower() or domain
+        year = _extract_year(f"{item.get('title', '')} {item.get('excerpt', '')} {url}")
+        is_review = _is_review(item)
+        is_announcement = _is_announcement(item)
+        is_directory = domain in DIRECTORY_DOMAINS
+        base_score = 1.0
+        if domain in TIER_1_DOMAINS:
+            base_score += 2.0
+        elif domain in TIER_2_DOMAINS:
+            base_score += 1.0
+        if is_directory:
+            base_score -= 0.6
+
+        if criterion_id in {"2_past", "2_future", "3"} and is_review:
+            base_score += 0.7
+        if criterion_id in {"4_past", "4_future"} and is_announcement:
+            base_score += 0.6
+        if criterion_id == "5":
+            if _is_sales_signal(item):
+                base_score += 0.6
+            if _is_award_signal(item):
+                base_score += 0.3
+        if criterion_id == "6" and _is_award_signal(item):
+            base_score += 0.4
+        if criterion_id == "7" and domain in SALARY_DOMAINS:
+            base_score += 1.0
+
+        overlap_with_c3 = url in existing_c3_urls or domain in existing_c3_domains
+        if criterion_id in {"2_past", "2_future"} and overlap_with_c3:
+            base_score -= 1.0
+        if criterion_id == "6" and overlap_with_c3 and not _is_award_signal(item):
+            base_score -= 0.6
+
+        candidates.append({
+            "item": item,
+            "domain": domain,
+            "source_norm": source_norm,
+            "year": year,
+            "is_review": is_review,
+            "is_announcement": is_announcement,
+            "is_directory": is_directory,
+            "overlap_with_c3": overlap_with_c3,
+            "domain_year_key": f"{domain}:{year}" if year else domain,
+            "base_score": base_score,
+            "used": False
+        })
+
+    domain_cap = 3 if criterion_id in {"2_past", "2_future", "3", "4_past", "4_future"} else None
+    selected = []
+    domain_counts = {}
+    source_counts = {}
+    year_counts = {}
+    review_count = 0
+    used_domain_year = set()
+
+    def _pick_next(allow_domain_cap: bool) -> Optional[int]:
+        best_idx = None
+        best_score = -1e9
+        for idx, cand in enumerate(candidates):
+            if cand["used"]:
+                continue
+            if criterion_id == "1" and cand["domain_year_key"] in used_domain_year:
+                continue
+            if allow_domain_cap and domain_cap and domain_counts.get(cand["domain"], 0) >= domain_cap:
+                continue
+            if criterion_id in {"2_past", "2_future"} and cand["is_review"] and review_overlap_present:
+                if review_count >= 5:
+                    if any(not c["used"] and not c["is_review"] for c in candidates):
+                        continue
+            score = cand["base_score"]
+            if cand["domain"] and cand["domain"] not in domain_counts:
+                score += 0.4
+            if cand["source_norm"] and cand["source_norm"] not in source_counts:
+                score += 0.3
+            if cand["year"] and cand["year"] not in year_counts:
+                score += 0.2
+            if criterion_id == "3" and cand["source_norm"] and cand["source_norm"] not in source_counts:
+                score += 0.5
+            if score > best_score:
+                best_score = score
+                best_idx = idx
+        return best_idx
+
+    target_count = min(max_results, len(candidates))
+    while len(selected) < target_count:
+        next_idx = _pick_next(allow_domain_cap=True)
+        if next_idx is None:
+            break
+        cand = candidates[next_idx]
+        cand["used"] = True
+        selected.append(cand)
+        domain_counts[cand["domain"]] = domain_counts.get(cand["domain"], 0) + 1
+        source_counts[cand["source_norm"]] = source_counts.get(cand["source_norm"], 0) + 1
+        if cand["year"]:
+            year_counts[cand["year"]] = year_counts.get(cand["year"], 0) + 1
+        if cand["is_review"]:
+            review_count += 1
+        if criterion_id == "1":
+            used_domain_year.add(cand["domain_year_key"])
+
+    if len(selected) < min_results:
+        while len(selected) < min_results:
+            next_idx = _pick_next(allow_domain_cap=False)
+            if next_idx is None:
+                break
+            cand = candidates[next_idx]
+            cand["used"] = True
+            selected.append(cand)
+
+    if criterion_id == "3":
+        distinct_publishers = len(source_counts)
+        if distinct_publishers < 3:
+            remaining = [c for c in candidates if not c["used"] and c["source_norm"] not in source_counts]
+            while distinct_publishers < 3 and remaining:
+                replacement = remaining.pop(0)
+                if not selected:
+                    break
+                worst = min(selected, key=lambda c: c["base_score"])
+                selected.remove(worst)
+                selected.append(replacement)
+                source_counts[replacement["source_norm"]] = source_counts.get(replacement["source_norm"], 0) + 1
+                distinct_publishers = len(source_counts)
+
+    return [cand["item"] for cand in selected[:max_results]]
+    try:
+        log_path = os.getenv("TOKEN_LOG_PATH", "token_usage_log.jsonl")
+        with open(log_path, "a", encoding="utf-8") as log_file:
+            log_file.write(json.dumps(log_entry) + "\n")
+    except Exception:
+        pass
 
 
 # System prompt with detailed USCIS guidance and criterion-specific instructions
@@ -40,6 +378,8 @@ CRITICAL RULES FOR CRITERION 1:
 - AVOID: Third-party publications discussing the award (Forbes, biography pages, news articles)
 - AVOID: Artist biographies, Wikipedia, management pages
 - MUST BE: The actual award organization's website or official winner announcement
+- OK to include multiple awards from the same issuer if they are different award-year pages
+- Avoid multiple results for the same award-year page (no duplicate Grammy 2026 pages)
 Example GOOD sources: grammy.com/awards/winners, kennedy-center.org/honors
 Example BAD sources: forbes.com/artist-biography, wikipedia.org, artist-website.com/awards
 
@@ -49,6 +389,9 @@ Criterion 2_past (Past Lead Roles):
 - MUST show artist in lead/starring role
 - Look for: Carnegie Hall programs, Met Opera archives, festival reviews
 - Dates must be in the PAST
+- Prefer reviews that show critical acclaim for the performance
+- Also include official announcements from distinguished organizations (venue/festival sites)
+- Use directories (Operabase/Bachtrack) only as a fallback
 
 Criterion 2_future (Future Lead Roles):
 - Find UPCOMING performances: season brochures, venue calendars
@@ -56,6 +399,8 @@ Criterion 2_future (Future Lead Roles):
 - MUST clearly show lead/starring role
 - Look for: 2026-2027 season announcements, confirmed bookings
 - Dates must be in the FUTURE
+- Prefer official venue/festival announcements over directories
+- Use directories (Operabase/Bachtrack) only as a fallback
 
 Criterion 3 (Critical Reviews):
 - Find SUBSTANTIAL reviews and articles about the artist
@@ -63,6 +408,8 @@ Criterion 3 (Critical Reviews):
 - AVOID: Event listings, one-line mentions, low-quality blogs
 - MUST BE: Full review articles (300+ words) focused on the artist's performance/work
 - Look for: "Review:", critic bylines, detailed artistic analysis
+- Aim for 10-15 results across 3 or more publishers when possible
+- Avoid returning many results from a single publication
 
 Criterion 4_past (Past Distinguished Organizations):
 - Find evidence of PAST work with prestigious venues/ensembles
@@ -70,27 +417,35 @@ Criterion 4_past (Past Distinguished Organizations):
 - Prioritize: Carnegie Hall, Metropolitan Opera, major symphony orchestras
 - Look for: Official venue archives, program listings, performance announcements
 - Dates must be in the PAST
+- Prioritize official venue announcements/archives
+- Use directories (Operabase/Bachtrack) only as a fallback
 
 Criterion 4_future (Future Distinguished Organizations):
 - Find ANNOUNCED future engagements with prestigious organizations
 - Include: Announcement + organization prestige evidence
 - Look for: Season brochures, official venue calendars, press releases
 - Dates must be in the FUTURE
+- Prioritize official venue announcements/season brochures
+- Use directories (Operabase/Bachtrack) only as a fallback
 
 Criterion 5 (Commercial Success):
 - Find evidence of box office success, chart rankings, sold-out shows
 - Prioritize: Billboard charts, Spotify charts, venue capacity data, ticket sales
 - Look for: "sold out", chart positions, streaming numbers, box office reports
+- Prefer the strongest evidence even if fewer results
 
 Criterion 6 (Recognition):
 - Find evidence of recognition from leading organizations/experts
 - Include: Awards from organizations, expert testimonials, honors, fellowships
 - Look for: Honorary degrees, fellowships, institutional recognition
+- Aim for one piece of evidence per expert/critic/organization
+- Avoid overlap with Criterion 3 unless discussing a distinct achievement (award/honor)
 
 Criterion 7 (High Salary):
 - Find evidence of artist fees/contracts (rare to find publicly)
 - Include: BLS wage data, O*NET salary benchmarks, union scales
 - Look for: Contract announcements, fee schedules, salary surveys
+- Focus on reliable statistics sources; diversity is not required
 
 ===========================================
 SOURCE QUALITY HIERARCHY
@@ -152,7 +507,8 @@ Other Awards:
 YOUR TASK
 ===========================================
 
-Search the web for 8-10 high-quality sources that support the given O-1 criterion.
+Search the web broadly to build a large pool of sources that support the given O-1 criterion.
+We will rank and diversify the pool after retrieval, so include Tier 2/3 sources when Tier 1 is limited.
 
 CRITICAL FILTERING:
 - For Criterion 1: ONLY include grammy.com or official award organization sites
@@ -186,7 +542,9 @@ def search_with_responses_api(
     name_variants: Optional[List[str]] = None,
     artist_field: Optional[str] = None,
     feedback: Optional[str] = None,
-    max_results: int = 10
+    max_results: Optional[int] = None,
+    min_results: Optional[int] = None,
+    retrieval_pool_size: Optional[int] = None
 ) -> List[Dict]:
     """
     Use OpenAI Responses API with web_search tool for evidence research
@@ -199,6 +557,8 @@ def search_with_responses_api(
         artist_field: Field of work (e.g., "Classical Music")
         feedback: User feedback for regeneration
         max_results: Maximum number of results to return
+        min_results: Minimum number of results to return
+        retrieval_pool_size: Size of the broad retrieval pool
     
     Returns:
         List of evidence sources with url, title, source, excerpt, relevance
@@ -212,6 +572,18 @@ def search_with_responses_api(
     
     client = OpenAI(api_key=api_key)
     
+    config = get_search_config(criterion_id)
+    if max_results is None:
+        max_results = config["max"]
+    if min_results is None:
+        min_results = config["min"]
+    if retrieval_pool_size is None:
+        retrieval_pool_size = config["pool"]
+
+    max_results = int(max_results)
+    min_results = int(min_results)
+    retrieval_pool_size = int(max(retrieval_pool_size, max_results))
+
     # Build the research prompt
     prompt = f"""Search the web for evidence that {artist_name} meets this O-1 visa criterion:
 
@@ -235,6 +607,8 @@ CRITICAL FOR CRITERION 1 (AWARDS):
 - DO NOT include Forbes, Wikipedia, artist biographies, or news articles
 - DO NOT include third-party coverage of awards
 - MUST be the award organization's own website
+- OK to include multiple awards from the same issuer if they are different award-year pages
+- Avoid multiple results for the same award-year page
 
 REJECT these source types:
 - forbes.com/artist-name
@@ -250,11 +624,6 @@ ACCEPT only these source types:
 - pulitzer.org/winners
 - opusklassik.de/preistraeger (for classical music)
 - [official-award-organization].org/winners
-
-QUALITY OVER QUANTITY:
-If you can only find 3-5 official award sites, return only those 3-5.
-DO NOT fill the remaining slots with Forbes or biographies.
-Better to return 3 perfect sources than 10 mixed sources.
 """
     elif criterion_id == "6":
         prompt += f"""
@@ -262,10 +631,6 @@ CRITICAL FOR CRITERION 6 (RECOGNITION):
 - Focus on recognition from leading organizations, institutions, or experts
 - Include: Honorary degrees, fellowships, institutional awards, expert testimonials
 - Prioritize: Universities, professional associations, government entities
-
-QUALITY OVER QUANTITY:
-If you can only find 3-5 high-quality recognition sources, return only those.
-DO NOT include generic articles or weak sources to fill the quota.
 """
     elif criterion_id == "7":
         prompt += f"""
@@ -273,20 +638,16 @@ CRITICAL FOR CRITERION 7 (HIGH SALARY):
 - Artist fee/contract data is rarely public - don't force it
 - Include: BLS wage data, O*NET salary benchmarks, union scales
 - If no reliable fee data exists, return fewer sources
-
-QUALITY OVER QUANTITY:
-Salary data is often unavailable. Return 2-3 sources with benchmark data rather than 10 speculative sources.
 """
     
-    # Adjust the "find X sources" instruction based on criterion
-    if criterion_id in ["1", "6", "7"]:
-        prompt += f"\nFind UP TO {max_results} high-quality sources (following the criterion-specific guidance above).\n"
-        prompt += "Return FEWER sources if necessary to maintain quality standards.\n"
-    else:
-        prompt += f"\nFind {max_results} high-quality sources (following the criterion-specific guidance above).\n"
+    prompt += f"\nFind UP TO {retrieval_pool_size} sources for a broad retrieval pool.\n"
+    prompt += "Prioritize quality, but include Tier 2/3 sources if Tier 1 is limited.\n"
+    prompt += "Avoid duplicate results from the same source whenever possible.\n"
     
     if feedback:
         prompt += f"\nUser feedback: {feedback}\n"
+
+    prompt += "\nIf this is a relaxed fallback search, allow directories and broader sources only when official sources are insufficient.\n"
     
     prompt += """
 Return ONLY a JSON array in this format:
@@ -302,91 +663,47 @@ Return ONLY a JSON array in this format:
 
 DO NOT include any other text. ONLY the JSON array.
 """
-    
-    try:
-        # Call Responses API with web_search tool
-        response = client.responses.create(
-            model="gpt-4o",  # Use gpt-4o for web search support
-            input=[
-                {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
-                {"role": "user", "content": prompt}
-            ],
-            tools=[
-                {
-                    "type": "web_search_preview_2025_03_11"
-                    # Note: 'name' parameter not needed in Responses API
-                }
-            ]
-        )
-        
-        # Extract text from response
-        content_text = response.output_text
-        
-        if not content_text:
-            raise RuntimeError("API returned empty response")
-        
-        # Parse JSON response
+
+    def _run_search(strict_mode: bool) -> List[Dict]:
         try:
-            # Try to extract JSON array from response
-            # The response might include extra text since we can't force JSON format
-            content_text = content_text.strip()
-            
-            # Try to find JSON array markers
-            # Look for [ and ] that likely contain our JSON
-            start = content_text.find('[')
-            end = content_text.rfind(']') + 1
-            
-            if start == -1 or end == 0:
-                # No JSON array found - try to parse the whole thing
-                # Maybe it's just the JSON without extra text
-                try:
-                    results = json.loads(content_text)
-                    if isinstance(results, list):
-                        # Great, it was just a JSON array
-                        pass
-                    else:
-                        raise ValueError("Response is not a JSON array")
-                except json.JSONDecodeError:
-                    raise ValueError(
-                        f"No JSON array found in response. "
-                        f"Response was: {content_text[:200]}..."
-                    )
+            search_prompt = prompt
+            if strict_mode:
+                search_prompt += "\nSTRICT MODE: favor Tier 1/2 and avoid directories unless unavoidable.\n"
             else:
-                # Found array markers - extract JSON
-                json_str = content_text[start:end]
-                results = json.loads(json_str)
-                
-                if not isinstance(results, list):
-                    raise ValueError("Response is not a JSON array")
-            
-            # Validate and normalize results
-            normalized_results = []
-            for item in results:
-                if not isinstance(item, dict):
-                    continue
-                
-                # Ensure required fields
-                if 'url' not in item or not item['url']:
-                    continue
-                
-                normalized_results.append({
-                    'url': item.get('url', ''),
-                    'title': item.get('title', 'Untitled'),
-                    'source': item.get('source', 'Unknown'),
-                    'excerpt': item.get('excerpt', ''),
-                    'relevance': item.get('relevance', '')
-                })
-            
-            return normalized_results[:max_results]
-        
-        except (json.JSONDecodeError, ValueError) as e:
-            raise RuntimeError(
-                f"Failed to parse API response as JSON: {str(e)}\n\n"
-                f"Response was:\n{content_text[:500]}"
+                search_prompt += "\nRELAXED MODE: allow directories and Tier 3 sources if needed to meet minimum results.\n"
+
+            response = client.responses.create(
+                model="gpt-4o",
+                input=[
+                    {"role": "system", "content": RESEARCH_SYSTEM_PROMPT},
+                    {"role": "user", "content": search_prompt}
+                ],
+                tools=[
+                    {
+                        "type": "web_search_preview_2025_03_11"
+                    }
+                ]
             )
-    
-    except Exception as e:
-        raise RuntimeError(f"OpenAI Responses API error: {str(e)}")
+            _log_token_usage(criterion_id, response, retrieval_pool_size, max_results, min_results, strict_mode)
+            content_text = response.output_text
+            return _parse_search_results(content_text)
+        except Exception as e:
+            raise RuntimeError(f"OpenAI Responses API error: {str(e)}")
+
+    try:
+        results = _run_search(strict_mode=True)
+        if len(results) < min_results:
+            fallback_results = _run_search(strict_mode=False)
+            results = results + [item for item in fallback_results if item.get("url") not in {r.get("url") for r in results}]
+
+        ranked_results = _rank_and_select_results(criterion_id, results, min_results, max_results)
+        if not ranked_results and results:
+            ranked_results = results[:max_results]
+        return ranked_results
+    except (json.JSONDecodeError, ValueError) as e:
+        raise RuntimeError(
+            f"Failed to parse API response as JSON: {str(e)}"
+        )
 
 
 # ============================================================
@@ -399,7 +716,7 @@ def batch_search_with_responses(
     criteria_descriptions: Dict[str, str],
     name_variants: Optional[List[str]] = None,
     artist_field: Optional[str] = None,
-    max_results_per_criterion: int = 10
+    max_results_per_criterion: Optional[int] = None
 ) -> Dict[str, List[Dict]]:
     """
     Search multiple criteria in sequence using Responses API
