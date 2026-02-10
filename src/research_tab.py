@@ -128,7 +128,8 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
             if st.button("🔍 Search with AI", key=f"ai_{cid}", use_container_width=True):
                 with st.spinner("🤖 AI Agent searching..."):
                     try:
-                        from src.ai_responses import search_with_responses_api
+                        from src.ai_responses import search_with_responses_api, get_search_config
+                        config = get_search_config(cid)
                         
                         results_found = search_with_responses_api(
                             artist_name=beneficiary_name,
@@ -136,7 +137,9 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                             criterion_description=desc,
                             name_variants=st.session_state.beneficiary_variants,
                             artist_field=st.session_state.artist_field,
-                            max_results=10
+                            max_results=config["max"],
+                            min_results=config["min"],
+                            retrieval_pool_size=config["pool"]
                         )
                         
                         if results_found:
@@ -264,7 +267,8 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
         if st.button("🔄 Regenerate with AI", key=f"regen_{cid}"):
             with st.spinner("Regenerating..."):
                 try:
-                    from src.ai_responses import search_with_responses_api
+                    from src.ai_responses import search_with_responses_api, get_search_config
+                    config = get_search_config(cid)
                     
                     # Get approved/rejected URLs
                     approved_urls = [url for url, ok in st.session_state.research_approvals[cid].items() if ok]
@@ -285,7 +289,9 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                         name_variants=st.session_state.beneficiary_variants,
                         artist_field=st.session_state.artist_field,
                         feedback=feedback_msg,
-                        max_results=10
+                        max_results=config["max"],
+                        min_results=config["min"],
+                        retrieval_pool_size=config["pool"]
                     )
                     
                     if new_results:
@@ -323,6 +329,23 @@ def render_research_summary():
         st.metric("Total Sources", total_sources)
     with col2:
         st.metric("Approved Sources", total_approved)
+
+    token_log = st.session_state.get("token_usage_log", [])
+    if token_log:
+        input_tokens = sum(entry.get("input_tokens", 0) for entry in token_log)
+        output_tokens = sum(entry.get("output_tokens", 0) for entry in token_log)
+        total_tokens = sum(entry.get("total_tokens", 0) for entry in token_log)
+        input_cost = (input_tokens / 1_000_000) * 1.75
+        output_cost = (output_tokens / 1_000_000) * 14.0
+        total_cost = input_cost + output_cost
+        st.markdown("### 💰 Token Usage")
+        usage_col1, usage_col2, usage_col3 = st.columns(3)
+        with usage_col1:
+            st.metric("Input Tokens", f"{input_tokens:,}")
+        with usage_col2:
+            st.metric("Output Tokens", f"{output_tokens:,}")
+        with usage_col3:
+            st.metric("Est. Cost", f"${total_cost:.2f}")
     
     if total_approved == 0:
         st.info("No sources approved yet. Approve sources above to continue.")
