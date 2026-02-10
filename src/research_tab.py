@@ -17,8 +17,14 @@ def render_research_tab():
     
     beneficiary_name = st.session_state.beneficiary_name
     
-    # Show all criteria as dropdowns
+    # Research all criteria at once
+    if st.button("🔍 Research all Criteria", key="research_all_criteria", type="primary", use_container_width=True):
+        _run_ai_research_all_criteria(beneficiary_name)
+        return  # rerun happens inside helper
+    
     st.divider()
+    
+    # Show all criteria as dropdowns
     
     for cid, desc in CRITERIA.items():
         render_criterion_research(cid, desc, beneficiary_name)
@@ -26,6 +32,53 @@ def render_research_tab():
     # Summary at bottom
     st.divider()
     render_research_summary()
+
+
+def _run_ai_research_all_criteria(beneficiary_name: str):
+    """Run AI Research for every criterion in sequence and update session state."""
+    from src.ai_responses import search_with_responses_api, get_search_config
+
+    criteria_list = list(CRITERIA.items())
+    progress_placeholder = st.empty()
+    status_placeholder = st.empty()
+    total_found = 0
+
+    for idx, (cid, desc) in enumerate(criteria_list):
+        progress_placeholder.progress((idx + 1) / len(criteria_list), text=f"Criterion {cid}...")
+        status_placeholder.caption(f"Researching: {desc[:60]}...")
+        try:
+            config = get_search_config(cid)
+            results_found = search_with_responses_api(
+                artist_name=beneficiary_name,
+                criterion_id=cid,
+                criterion_description=desc,
+                name_variants=st.session_state.beneficiary_variants,
+                artist_field=st.session_state.artist_field,
+                max_results=config["max"],
+                min_results=config["min"],
+                retrieval_pool_size=config["pool"],
+            )
+            if results_found:
+                if cid not in st.session_state.research_results:
+                    st.session_state.research_results[cid] = []
+                if cid not in st.session_state.research_approvals:
+                    st.session_state.research_approvals[cid] = {}
+                for item in results_found:
+                    url = item["url"]
+                    if not any(r["url"] == url for r in st.session_state.research_results[cid]):
+                        st.session_state.research_results[cid].append(item)
+                        st.session_state.research_approvals[cid][url] = True
+                total_found += len(results_found)
+        except Exception as e:
+            status_placeholder.warning(f"Criterion {cid} failed: {str(e)}")
+
+    progress_placeholder.empty()
+    status_placeholder.empty()
+    if total_found > 0:
+        st.success(f"✅ Research all complete. Found {total_found} sources across {len(criteria_list)} criteria.")
+    else:
+        st.warning("Research all finished but no new sources were found.")
+    st.rerun()
 
 
 def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
