@@ -101,6 +101,24 @@ def _extract_year(text: str) -> Optional[str]:
     return match.group(0) if match else None
 
 
+def _extract_venue_or_city(text: str) -> str:
+    """Extract likely venue or city for diversity dedupe."""
+    if not text:
+        return ""
+    t = (text or "").lower()
+    # Common venue/city patterns
+    cities = ["paris", "london", "vienna", "munich", "rome", "milan", "new york", "detroit", "chicago", "berlin", "moscow", "santa fe", "verona", "salzburg", "glyndebourne"]
+    for c in cities:
+        if c in t:
+            return c
+    # Opera houses / venues
+    venues = ["metropolitan opera", "met opera", "carnegie hall", "bolshoi", "opéra", "opera", "staatsoper", "symphony", "orchestra", "arena"]
+    for v in venues:
+        if v in t:
+            return v
+    return ""
+
+
 def _is_review(item: Dict) -> bool:
     text = f"{item.get('title', '')} {item.get('excerpt', '')}".lower()
     return "review" in text or "critically acclaimed" in text
@@ -218,6 +236,10 @@ def _rank_and_select_results(
 
     existing_c3_urls, existing_c3_domains = _get_existing_results("3")
     review_overlap_present = bool(existing_c3_urls or existing_c3_domains)
+    any_non_directory = any(
+        _normalize_domain(item.get("url", "")) not in DIRECTORY_DOMAINS
+        for item in results
+    )
 
     candidates = []
     seen_urls = set()
@@ -239,6 +261,10 @@ def _rank_and_select_results(
             base_score += 1.0
         if is_directory:
             base_score -= 0.6
+            if criterion_id in {"2_past", "2_future"}:
+                base_score -= 0.6
+            if any_non_directory:
+                base_score -= 0.8
 
         if criterion_id in {"2_past", "2_future", "3"} and is_review:
             base_score += 0.7
@@ -260,6 +286,20 @@ def _rank_and_select_results(
         if criterion_id == "6" and overlap_with_c3 and not _is_award_signal(item):
             base_score -= 0.6
 
+        performance_key = ""
+        if criterion_id in {"2_past", "2_future", "4_past", "4_future"}:
+            title_text = (item.get("title", "") or "").lower()
+            excerpt_text = (item.get("excerpt", "") or "").lower()
+            combined = f"{title_text} {excerpt_text}"
+            # Normalize: remove years, dates, numbers
+            combined = re.sub(r"\b(19|20)\d{2}\b", "", combined)
+            combined = re.sub(r"\d{1,2}\s*(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\w*", "", combined, flags=re.I)
+            combined = re.sub(r"\d+", "", combined)
+            combined = re.sub(r"\s+", " ", combined).strip()
+            prod_part = combined[:60]
+            venue = _extract_venue_or_city(f"{title_text} {excerpt_text}")
+            performance_key = f"{prod_part}|{venue}" if venue else prod_part
+
         candidates.append({
             "item": item,
             "domain": domain,
@@ -270,6 +310,7 @@ def _rank_and_select_results(
             "is_directory": is_directory,
             "overlap_with_c3": overlap_with_c3,
             "domain_year_key": f"{domain}:{year}" if year else domain,
+            "performance_key": performance_key,
             "base_score": base_score,
             "used": False
         })
@@ -280,6 +321,8 @@ def _rank_and_select_results(
     source_counts = {}
     year_counts = {}
     review_count = 0
+    directory_count = 0
+    performance_counts = {}
     used_domain_year = set()
 
     def _pick_next(allow_domain_cap: bool) -> Optional[int]:
@@ -292,6 +335,14 @@ def _rank_and_select_results(
                 continue
             if allow_domain_cap and domain_cap and domain_counts.get(cand["domain"], 0) >= domain_cap:
                 continue
+            if criterion_id in {"2_past", "2_future"} and cand["is_directory"] and any_non_directory:
+                if any(not c["used"] and not c["is_directory"] for c in candidates):
+                    continue
+            if criterion_id in {"2_past", "2_future"} and cand["is_directory"] and directory_count >= 2:
+                continue
+            if cand["performance_key"] and performance_counts.get(cand["performance_key"], 0) >= 1:
+                if any(not c["used"] and c["performance_key"] != cand["performance_key"] for c in candidates):
+                    continue
             if criterion_id in {"2_past", "2_future"} and cand["is_review"] and review_overlap_present:
                 if review_count >= 5:
                     if any(not c["used"] and not c["is_review"] for c in candidates):
@@ -317,6 +368,17 @@ def _rank_and_select_results(
             break
         cand = candidates[next_idx]
         cand["used"] = True
+        # Capture ranking factors at selection time
+        factors = []
+        if cand["domain"] and cand["domain"] not in domain_counts:
+            factors.append("domain diversity")
+        if cand["source_norm"] and cand["source_norm"] not in source_counts:
+            factors.append("publisher diversity")
+        if cand["year"] and cand["year"] not in year_counts:
+            factors.append("year diversity")
+        if criterion_id in {"2_past", "2_future", "4_past", "4_future"} and cand["performance_key"] and performance_counts.get(cand["performance_key"], 0) == 0:
+            factors.append("distinct performance")
+        cand["_selection_factors"] = factors
         selected.append(cand)
         domain_counts[cand["domain"]] = domain_counts.get(cand["domain"], 0) + 1
         source_counts[cand["source_norm"]] = source_counts.get(cand["source_norm"], 0) + 1
@@ -324,6 +386,10 @@ def _rank_and_select_results(
             year_counts[cand["year"]] = year_counts.get(cand["year"], 0) + 1
         if cand["is_review"]:
             review_count += 1
+        if cand["is_directory"]:
+            directory_count += 1
+        if cand["performance_key"]:
+            performance_counts[cand["performance_key"]] = performance_counts.get(cand["performance_key"], 0) + 1
         if criterion_id == "1":
             used_domain_year.add(cand["domain_year_key"])
 
@@ -334,6 +400,7 @@ def _rank_and_select_results(
                 break
             cand = candidates[next_idx]
             cand["used"] = True
+            cand["_selection_factors"] = cand.get("_selection_factors", []) or ["fallback: relaxed constraints"]
             selected.append(cand)
 
     if criterion_id == "3":
@@ -350,13 +417,34 @@ def _rank_and_select_results(
                 source_counts[replacement["source_norm"]] = source_counts.get(replacement["source_norm"], 0) + 1
                 distinct_publishers = len(source_counts)
 
-    return [cand["item"] for cand in selected[:max_results]]
-    try:
-        log_path = os.getenv("TOKEN_LOG_PATH", "token_usage_log.jsonl")
-        with open(log_path, "a", encoding="utf-8") as log_file:
-            log_file.write(json.dumps(log_entry) + "\n")
-    except Exception:
-        pass
+    # Attach explainability metadata to each item
+    out = []
+    for cand in selected[:max_results]:
+        item = dict(cand["item"])
+        badges = []
+        if cand["is_directory"]:
+            badges.append("Directory")
+        elif cand["is_announcement"]:
+            badges.append("Announcement")
+        elif cand["is_review"]:
+            badges.append("Review")
+        else:
+            badges.append("Primary")
+        if cand["domain"] in TIER_1_DOMAINS:
+            badges.append("Tier 1")
+        elif cand["domain"] in TIER_2_DOMAINS:
+            badges.append("Tier 2")
+        item["_meta"] = {
+            "badges": badges,
+            "ranking_factors": cand.get("_selection_factors", []),
+            "stage": "strict" if not cand["is_directory"] else "fallback",
+            "is_directory": cand["is_directory"],
+            "is_announcement": cand["is_announcement"],
+            "is_review": cand["is_review"],
+        }
+        out.append(item)
+
+    return out
 
 
 # System prompt with detailed USCIS guidance and criterion-specific instructions
@@ -401,6 +489,7 @@ Criterion 2_future (Future Lead Roles):
 - Dates must be in the FUTURE
 - Prefer official venue/festival announcements over directories
 - Use directories (Operabase/Bachtrack) only as a fallback
+- Avoid multiple listings for the same production or city when possible
 
 Criterion 3 (Critical Reviews):
 - Find SUBSTANTIAL reviews and articles about the artist
@@ -544,7 +633,8 @@ def search_with_responses_api(
     feedback: Optional[str] = None,
     max_results: Optional[int] = None,
     min_results: Optional[int] = None,
-    retrieval_pool_size: Optional[int] = None
+    retrieval_pool_size: Optional[int] = None,
+    relaxation_stage: Optional[str] = None
 ) -> List[Dict]:
     """
     Use OpenAI Responses API with web_search tool for evidence research
@@ -691,10 +781,16 @@ DO NOT include any other text. ONLY the JSON array.
             raise RuntimeError(f"OpenAI Responses API error: {str(e)}")
 
     try:
-        results = _run_search(strict_mode=True)
-        if len(results) < min_results:
-            fallback_results = _run_search(strict_mode=False)
-            results = results + [item for item in fallback_results if item.get("url") not in {r.get("url") for r in results}]
+        # Determine search strategy from relaxation_stage
+        if relaxation_stage == "strict":
+            results = _run_search(strict_mode=True)
+        elif relaxation_stage == "relaxed":
+            results = _run_search(strict_mode=False)
+        else:
+            results = _run_search(strict_mode=True)
+            if len(results) < min_results:
+                fallback_results = _run_search(strict_mode=False)
+                results = results + [item for item in fallback_results if item.get("url") not in {r.get("url") for r in results}]
 
         ranked_results = _rank_and_select_results(criterion_id, results, min_results, max_results)
         if not ranked_results and results:
