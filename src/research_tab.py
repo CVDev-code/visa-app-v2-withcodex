@@ -182,17 +182,23 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                 with st.spinner("🤖 AI Agent searching..."):
                     try:
                         from src.ai_responses import search_with_responses_api, get_search_config
+                        from src.feedback_store import get_merged_feedback, build_search_feedback_text
                         config = get_search_config(cid)
+                        merged_feedback = get_merged_feedback(beneficiary_name)
+                        refined_feedback = build_search_feedback_text(merged_feedback, cid)
                         
+                        stage = st.session_state.research_search_stage.get(cid, "auto")
                         results_found = search_with_responses_api(
                             artist_name=beneficiary_name,
                             criterion_id=cid,
                             criterion_description=desc,
                             name_variants=st.session_state.beneficiary_variants,
                             artist_field=st.session_state.artist_field,
+                            feedback=refined_feedback or None,
                             max_results=config["max"],
                             min_results=config["min"],
-                            retrieval_pool_size=config["pool"]
+                            retrieval_pool_size=config["pool"],
+                            relaxation_stage=stage
                         )
                         
                         if results_found:
@@ -228,7 +234,7 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
         st.markdown("### ✅ Review & Approve Sources")
         
         # Bulk actions
-        col1, col2 = st.columns([1, 1])
+        col1, col2, col3 = st.columns([1, 1, 2])
         with col1:
             if st.button("✅ Approve All", key=f"approve_all_{cid}"):
                 for i, item in enumerate(results):
@@ -237,6 +243,13 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                 st.rerun()
         
         with col2:
+            if st.button("❌ Reject All", key=f"reject_all_{cid}"):
+                for i, item in enumerate(results):
+                    st.session_state.research_approvals[cid][item['url']] = False
+                    st.session_state[f"approve_{cid}_{i}"] = False
+                st.rerun()
+        
+        with col3:
             if st.button("🗑️ Clear All Results", key=f"clear_{cid}"):
                 st.session_state.research_results[cid] = []
                 st.session_state.research_approvals[cid] = {}
@@ -244,41 +257,40 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
         
         st.markdown("---")
         
-        # Show each result with checkbox
+        # Show each result with checkbox, badges, explainability, cross-criterion actions
+        other_cids = [k for k in CRITERIA.keys() if k != cid]
         for i, item in enumerate(results):
             url = item['url']
             title = item.get('title', 'Untitled')
             source = item.get('source', 'Unknown')
             excerpt = item.get('excerpt', '')
+            meta = item.get('_meta', {})
+            badges = meta.get('badges', [])
+            factors = meta.get('ranking_factors', [])
+            stage = meta.get('stage', '')
             
             # Get filename for skip_highlighting tracking
-            # MUST match the filename created in convert_approved_to_pdfs
             if url.startswith('upload://'):
                 filename = url.replace('upload://', '')
             else:
-                filename = title + '.pdf'  # Add .pdf extension to match convert logic
+                filename = title + '.pdf'
             
-            # Read approval state directly from session state (not local variable)
             is_approved = st.session_state.research_approvals[cid].get(url, True)
-            
-            # Initialize skip_highlighting for this criterion if needed
             if cid not in st.session_state.skip_highlighting:
                 st.session_state.skip_highlighting[cid] = {}
             skip_highlight = st.session_state.skip_highlighting[cid].get(filename, False)
             
-            # Checkbox for approval
+            # Checkbox + badges
             col_approve, col_skip = st.columns([3, 1])
-            
             with col_approve:
-                new_approval = st.checkbox(
-                    f"**[{source}]** {title}",
-                    value=is_approved,
-                    key=f"approve_{cid}_{i}"
-                )
+                label = f"**[{source}]** {title}"
+                if badges:
+                    label += " " + " ".join(f"`{b}`" for b in badges[:4])
+                new_approval = st.checkbox(label, value=is_approved, key=f"approve_{cid}_{i}")
                 st.session_state.research_approvals[cid][url] = new_approval
             
             with col_skip:
-                if is_approved:  # Only show skip option if approved
+                if is_approved:
                     new_skip = st.checkbox(
                         "Skip highlighting",
                         value=skip_highlight,
@@ -287,7 +299,49 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                     )
                     st.session_state.skip_highlighting[cid][filename] = new_skip
             
-            # Show excerpt and URL
+            # Explainability: expandable "Why selected"
+            if factors or stage:
+                with st.expander("Why selected", expanded=False):
+                    if stage:
+                        st.caption(f"**Stage:** {stage}")
+                    if factors:
+                        st.caption("**Ranking factors:** " + ", ".join(factors))
+            
+            # Cross-criterion: Also applies to / Reassign to
+            cr_col1, cr_col2 = st.columns(2)
+            with cr_col1:
+                also_to = st.selectbox(
+                    "Also applies to",
+                    options=[""] + other_cids,
+                    key=f"also_{cid}_{i}",
+                    format_func=lambda x: f"Criterion ({x})" if x else "(none)"
+                )
+                if also_to:
+                    if also_to not in st.session_state.research_results:
+                        st.session_state.research_results[also_to] = []
+                        st.session_state.research_approvals[also_to] = {}
+                    if not any(r["url"] == url for r in st.session_state.research_results[also_to]):
+                        st.session_state.research_results[also_to].append(dict(item))
+                        st.session_state.research_approvals[also_to][url] = True
+                    st.rerun()
+            with cr_col2:
+                reassign_to = st.selectbox(
+                    "Reassign to",
+                    options=[""] + other_cids,
+                    key=f"reassign_{cid}_{i}",
+                    format_func=lambda x: f"Criterion ({x})" if x else "(none)"
+                )
+                if reassign_to:
+                    # Remove from current, add to target
+                    st.session_state.research_results[cid] = [r for r in st.session_state.research_results[cid] if r.get("url") != url]
+                    st.session_state.research_approvals[cid].pop(url, None)
+                    if reassign_to not in st.session_state.research_results:
+                        st.session_state.research_results[reassign_to] = []
+                        st.session_state.research_approvals[reassign_to] = {}
+                    st.session_state.research_results[reassign_to].append(dict(item))
+                    st.session_state.research_approvals[reassign_to][url] = True
+                    st.rerun()
+            
             if excerpt:
                 st.caption(f"📝 {excerpt[:200]}...")
             st.caption(f"🔗 {url}")
@@ -303,6 +357,22 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
         st.divider()
         st.markdown("### 🔄 Not satisfied?")
         
+        # Tighten / Relax controls
+        if cid not in st.session_state.research_search_stage:
+            st.session_state.research_search_stage[cid] = "strict"
+        stage = st.session_state.research_search_stage[cid]
+        tcol1, tcol2, tcol3 = st.columns([1, 1, 2])
+        with tcol1:
+            if st.button("🔒 Tighten", key=f"tighten_{cid}", help="Next search: stricter, primary sources only"):
+                st.session_state.research_search_stage[cid] = "strict"
+                st.rerun()
+        with tcol2:
+            if st.button("🔓 Relax", key=f"relax_{cid}", help="Next search: allow directories and broader sources"):
+                st.session_state.research_search_stage[cid] = "relaxed"
+                st.rerun()
+        with tcol3:
+            st.caption(f"Current stage: **{stage}**")
+        
         feedback_text = st.text_area(
             "Tell AI what to improve",
             placeholder="e.g., 'Need more from major publications'",
@@ -314,19 +384,26 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
             with st.spinner("Regenerating..."):
                 try:
                     from src.ai_responses import search_with_responses_api, get_search_config
+                    from src.feedback_store import (
+                        get_merged_feedback,
+                        build_search_feedback_text,
+                        update_feedback_for_research
+                    )
                     config = get_search_config(cid)
                     
                     # Get approved/rejected URLs
                     approved_urls = [url for url, ok in st.session_state.research_approvals[cid].items() if ok]
                     rejected_urls = [url for url, ok in st.session_state.research_approvals[cid].items() if not ok]
                     
-                    # Build feedback message
-                    feedback_msg = feedback_text or ""
-                    
-                    if rejected_urls:
-                        feedback_msg += f"\n\nAvoid sources like these (rejected):\n"
-                        for url in rejected_urls[:3]:  # Show first 3 as examples
-                            feedback_msg += f"- {url}\n"
+                    update_feedback_for_research(
+                        beneficiary_name=beneficiary_name,
+                        criterion_id=cid,
+                        rejected_urls=rejected_urls,
+                        regenerate_comment=feedback_text
+                    )
+                    merged_feedback = get_merged_feedback(beneficiary_name)
+                    feedback_msg = build_search_feedback_text(merged_feedback, cid)
+                    stage = st.session_state.research_search_stage.get(cid, "auto")
                     
                     new_results = search_with_responses_api(
                         artist_name=beneficiary_name,
@@ -334,10 +411,11 @@ def render_criterion_research(cid: str, desc: str, beneficiary_name: str):
                         criterion_description=desc,
                         name_variants=st.session_state.beneficiary_variants,
                         artist_field=st.session_state.artist_field,
-                        feedback=feedback_msg,
+                        feedback=feedback_msg or None,
                         max_results=config["max"],
                         min_results=config["min"],
-                        retrieval_pool_size=config["pool"]
+                        retrieval_pool_size=config["pool"],
+                        relaxation_stage=stage
                     )
                     
                     if new_results:
