@@ -38,9 +38,10 @@ def init_session_state():
         "final_packets": {},         # cached packet outputs
         
         # Tab 1: Research results by criterion
-        "research_results": {},      # {cid: [{url, title, excerpt, source}, ...]}
+        "research_results": {},      # {cid: [{url, title, excerpt, source, _meta?}, ...]}
         "research_approvals": {},    # {cid: {url: True/False, ...}}
         "skip_highlighting": {},     # {cid: {filename: True/False, ...}} - True = skip highlighting
+        "research_search_stage": {}, # {cid: "strict"|"relaxed"} for tighten/relax controls
         
         # Tab 2: PDFs and highlights by criterion  
         "criterion_pdfs": {},        # {cid: {filename: bytes, ...}}
